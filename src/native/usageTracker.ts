@@ -1,44 +1,64 @@
 import { Linking, NativeModules, Platform } from 'react-native';
 import { UsageApp } from '../types';
 
-const { UsageStatsModule } = NativeModules;
+type UsageStatsModuleType = {
+  isUsagePermissionGranted: () => Promise<boolean>;
+  openUsageAccessSettings: () => Promise<boolean>;
+  getTodayUsageStats: () => Promise<any[]>;
+};
+
+const UsageStatsModule = NativeModules.UsageStatsModule as
+  | UsageStatsModuleType
+  | undefined;
 
 export const usageTracker = {
   supported: Platform.OS === 'android' && !!UsageStatsModule,
 
   async isPermissionGranted(): Promise<boolean> {
-    if (Platform.OS !== 'android' || !UsageStatsModule) return false;
-    return UsageStatsModule.isUsagePermissionGranted();
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) return false;
+      return await UsageStatsModule.isUsagePermissionGranted();
+    } catch {
+      return false;
+    }
   },
 
-  async openPermissionSettings() {
-    if (Platform.OS !== 'android' || !UsageStatsModule) {
-      Linking.openSettings();
-      return;
-    }
+  async openPermissionSettings(): Promise<boolean | void> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        await Linking.openSettings();
+        return;
+      }
 
-    return UsageStatsModule.openUsageAccessSettings();
+      return await UsageStatsModule.openUsageAccessSettings();
+    } catch (error) {
+      throw error;
+    }
   },
 
   async getTodayUsage(): Promise<UsageApp[]> {
-    if (Platform.OS !== 'android' || !UsageStatsModule) return [];
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) return [];
 
-    const data = await UsageStatsModule.getTodayUsageStats();
+      const data = await UsageStatsModule.getTodayUsageStats();
 
-    if (!Array.isArray(data)) return [];
+      if (!Array.isArray(data)) return [];
 
-    return data
-      .map((item: any) => ({
-        packageName: String(item.packageName || ''),
-        appName: String(item.appName || item.packageName || 'Unknown App'),
-        foregroundMs: Number(item.foregroundMs || 0),
-        minutesUsed: Number(item.minutesUsed || 0),
-        lastTimeUsed: item.lastTimeUsed ? Number(item.lastTimeUsed) : undefined,
-        pickups: Number(item.pickups || 0),
-        unlocks: Number(item.unlocks || 0),
-        category: String(item.category || 'Other'),
-      }))
-      .filter((item: UsageApp) => !!item.packageName && item.minutesUsed > 0)
-      .sort((a: UsageApp, b: UsageApp) => b.minutesUsed - a.minutesUsed);
+      return data
+        .map((item: any) => ({
+          packageName: String(item.packageName || ''),
+          appName: String(item.appName || item.packageName || 'Unknown App'),
+          foregroundMs: Number(item.foregroundMs || 0),
+          minutesUsed: Number(item.minutesUsed || 0),
+          lastTimeUsed: item.lastTimeUsed ? Number(item.lastTimeUsed) : undefined,
+          pickups: Number(item.pickups || 0),
+          unlocks: Number(item.unlocks || 0),
+          category: String(item.category || 'Other'),
+        }))
+        .filter((item: UsageApp) => !!item.packageName && item.minutesUsed > 0)
+        .sort((a: UsageApp, b: UsageApp) => b.minutesUsed - a.minutesUsed);
+    } catch (error) {
+      throw error;
+    }
   },
 };

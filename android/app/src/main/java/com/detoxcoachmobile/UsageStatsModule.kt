@@ -5,6 +5,7 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Process
 import android.provider.Settings
 import com.facebook.react.bridge.Promise
@@ -24,11 +25,21 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
     fun isUsagePermissionGranted(promise: Promise) {
         try {
             val appOps = reactContext.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-            val mode = appOps.checkOpNoThrow(
-                "android:get_usage_stats",
-                Process.myUid(),
-                reactContext.packageName
-            )
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    reactContext.packageName
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    reactContext.packageName
+                )
+            }
+
             promise.resolve(mode == AppOpsManager.MODE_ALLOWED)
         } catch (e: Exception) {
             promise.reject("USAGE_PERMISSION_ERROR", e.message, e)
@@ -88,6 +99,27 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getTodayUsageStats(promise: Promise) {
         try {
+            val appOps = reactContext.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    reactContext.packageName
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    reactContext.packageName
+                )
+            }
+
+            if (mode != AppOpsManager.MODE_ALLOWED) {
+                promise.reject("PERMISSION_DENIED", "Usage access permission is not granted.")
+                return
+            }
+
             val usageStatsManager =
                 reactContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
 

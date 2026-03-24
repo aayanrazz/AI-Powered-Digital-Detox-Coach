@@ -81,7 +81,7 @@ export default function UsageMonitoringScreen() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Usage Access Permission</Text>
         <Text style={styles.cardText}>
-          {permissionGranted ? 'Granted ✅' : 'Not granted ❌'}
+          {permissionGranted ? 'Granted ' : 'Not granted ❌'}
         </Text>
 
         {!permissionGranted && (
