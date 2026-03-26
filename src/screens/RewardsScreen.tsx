@@ -1,42 +1,57 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { Alert, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import Screen from '../components/Screen';
 import PrimaryButton from '../components/PrimaryButton';
 import ProgressBar from '../components/ProgressBar';
 import { api } from '../api/api';
 import { RewardsSummary } from '../types';
 import { formatDateTime } from '../utils/helpers';
+import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
 
 export default function RewardsScreen() {
   const [data, setData] = useState<RewardsSummary | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [redeemingId, setRedeemingId] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
+      setRefreshing(true);
       const res = await api.getRewardsSummary();
       setData(res.rewards);
     } catch (error: any) {
       Alert.alert('Rewards error', error.message || 'Failed to load rewards');
+    } finally {
+      setRefreshing(false);
     }
-  };
-
-  useEffect(() => {
-    load();
   }, []);
+
+  useRefreshOnFocus(load);
 
   const redeem = async (rewardId?: string) => {
     if (!rewardId) return;
 
     try {
+      setRedeemingId(rewardId);
       await api.redeemReward(rewardId);
-      Alert.alert('Success', 'Reward redeemed');
+      Alert.alert('Success', 'Reward redeemed successfully.');
       await load();
     } catch (error: any) {
       Alert.alert('Redeem failed', error.message || 'Could not redeem reward');
+    } finally {
+      setRedeemingId(null);
     }
   };
 
   return (
-    <Screen>
+    <Screen
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={load}
+          tintColor="#ffffff"
+        />
+      }
+    >
       <Text style={styles.title}>Rewards & Gamification</Text>
       <Text style={styles.subtitle}>
         Earn points, build streaks, unlock badges, and level up
@@ -62,12 +77,48 @@ export default function RewardsScreen() {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Badges</Text>
+        <Text style={styles.cardTitle}>Badge Progress</Text>
+        <Text style={styles.cardText}>
+          Unlocked: {data?.unlockedBadgesCount ?? 0} / {data?.totalBadges ?? 0}
+        </Text>
+
+        <View style={{ marginTop: 12 }}>
+          <ProgressBar value={data?.badgeCompletionPct ?? 0} />
+          <Text style={styles.meta}>
+            {data?.badgeCompletionPct ?? 0}% badge completion
+          </Text>
+        </View>
+
+        {!!data?.latestBadge?.label && (
+          <Text style={styles.latestBadge}>
+            {data?.latestBadge?.emoji || '🏅'} Latest badge: {data?.latestBadge?.label}
+          </Text>
+        )}
+
+        {!!data?.nextBadgeHint?.hint && (
+          <Text style={styles.meta}>{data.nextBadgeHint.hint}</Text>
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Unlocked Badges</Text>
         {(data?.badges || []).length ? (
-          data?.badges?.map((badge, idx) => (
-            <Text key={idx} style={styles.badge}>
-              🏅 {badge}
-            </Text>
+          data?.badges?.map((badge) => (
+            <View key={badge.key} style={styles.badgeCard}>
+              <Text style={styles.badgeEmoji}>{badge.emoji || '🏅'}</Text>
+
+              <View style={{ flex: 1 }}>
+                <Text style={styles.badgeTitle}>{badge.label}</Text>
+                <Text style={styles.badgeText}>
+                  {badge.description || 'Achievement unlocked.'}
+                </Text>
+                {!!badge.earnedAt && (
+                  <Text style={styles.badgeMeta}>
+                    Earned: {formatDateTime(badge.earnedAt)}
+                  </Text>
+                )}
+              </View>
+            </View>
           ))
         ) : (
           <Text style={styles.cardText}>No badges unlocked yet.</Text>
@@ -82,8 +133,12 @@ export default function RewardsScreen() {
               <Text style={styles.rewardName}>{item.name}</Text>
               <Text style={styles.rewardMeta}>Cost: {item.cost} points</Text>
             </View>
-            <View style={{ width: 120 }}>
-              <PrimaryButton title="Redeem" onPress={() => redeem(item._id)} />
+            <View style={{ width: 130 }}>
+              <PrimaryButton
+                title={redeemingId === item._id ? 'Redeeming...' : 'Redeem'}
+                onPress={() => redeem(item._id)}
+                loading={redeemingId === item._id}
+              />
             </View>
           </View>
         ))}
@@ -179,10 +234,38 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     marginTop: 8,
   },
-  badge: {
+  latestBadge: {
     color: '#FDE68A',
-    marginBottom: 8,
+    marginTop: 12,
     fontWeight: '700',
+  },
+  badgeCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#0F172A',
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  badgeEmoji: {
+    fontSize: 26,
+    marginRight: 12,
+    lineHeight: 32,
+  },
+  badgeTitle: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  badgeText: {
+    color: '#CBD5E1',
+    marginTop: 6,
+  },
+  badgeMeta: {
+    color: '#94A3B8',
+    marginTop: 6,
+    fontSize: 12,
   },
   reward: {
     flexDirection: 'row',

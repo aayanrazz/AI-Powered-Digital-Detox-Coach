@@ -23,7 +23,7 @@ const RootStack = createNativeStackNavigator();
 
 function TabLabel({
   text,
-  focused
+  focused,
 }: {
   text: string;
   focused: boolean;
@@ -33,7 +33,7 @@ function TabLabel({
       style={{
         color: focused ? '#4F46E5' : '#94A3B8',
         fontSize: 12,
-        fontWeight: '700'
+        fontWeight: '700',
       }}
     >
       {text}
@@ -49,8 +49,8 @@ function MainTabs() {
         tabBarStyle: {
           backgroundColor: '#0F172A',
           borderTopColor: '#1E293B',
-          height: 68
-        }
+          height: 68,
+        },
       }}
     >
       <Tab.Screen
@@ -59,7 +59,7 @@ function MainTabs() {
         options={{
           tabBarLabel: ({ focused }) => (
             <TabLabel text="Home" focused={focused} />
-          )
+          ),
         }}
       />
       <Tab.Screen
@@ -68,7 +68,7 @@ function MainTabs() {
         options={{
           tabBarLabel: ({ focused }) => (
             <TabLabel text="Usage" focused={focused} />
-          )
+          ),
         }}
       />
       <Tab.Screen
@@ -77,7 +77,7 @@ function MainTabs() {
         options={{
           tabBarLabel: ({ focused }) => (
             <TabLabel text="Analytics" focused={focused} />
-          )
+          ),
         }}
       />
       <Tab.Screen
@@ -86,7 +86,7 @@ function MainTabs() {
         options={{
           tabBarLabel: ({ focused }) => (
             <TabLabel text="AI Plan" focused={focused} />
-          )
+          ),
         }}
       />
     </Tab.Navigator>
@@ -133,7 +133,7 @@ export default function RootNavigator() {
       screenOptions={{
         headerStyle: { backgroundColor: '#0B1220' },
         headerTintColor: '#fff',
-        contentStyle: { backgroundColor: '#0B1220' }
+        contentStyle: { backgroundColor: '#0B1220' },
       }}
     >
       <RootStack.Screen
@@ -144,6 +144,9 @@ export default function RootNavigator() {
       <RootStack.Screen name="Notifications" component={NotificationsScreen} />
       <RootStack.Screen name="Rewards" component={RewardsScreen} />
       <RootStack.Screen name="Settings" component={SettingsPrivacyScreen} />
+
+      {/* keep this available so CTA from welcome/onboarding notifications always works */}
+      <RootStack.Screen name="ProfileSetup" component={ProfileSetupScreen} />
     </RootStack.Navigator>
   );
 }

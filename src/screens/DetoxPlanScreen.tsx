@@ -1,33 +1,48 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useMemo, useState } from 'react';
+import { Alert, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import Screen from '../components/Screen';
 import PrimaryButton from '../components/PrimaryButton';
 import ProgressBar from '../components/ProgressBar';
 import { api } from '../api/api';
 import { DetoxPlan } from '../types';
-import { progressPercent } from '../utils/helpers';
+import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
 
 function formatShortDate(value?: string) {
   if (!value) return '';
   return new Date(value).toLocaleDateString();
 }
 
+function dayStatusLabel(status?: string) {
+  if (status === 'completed') return 'Completed';
+  if (status === 'in_progress') return 'In Progress';
+  return 'Pending';
+}
+
+function taskStatusIcon(status?: string) {
+  if (status === 'completed') return '✅';
+  if (status === 'in_progress') return '🟣';
+  return '⬜';
+}
+
 export default function DetoxPlanScreen() {
   const [plan, setPlan] = useState<DetoxPlan | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
 
-  const loadPlan = async () => {
+  const loadPlan = useCallback(async () => {
     try {
+      setRefreshing(true);
       const res = await api.getActivePlan();
       setPlan(res.plan);
     } catch {
       setPlan(null);
+    } finally {
+      setRefreshing(false);
     }
-  };
-
-  useEffect(() => {
-    loadPlan();
   }, []);
+
+  useRefreshOnFocus(loadPlan);
 
   const generatePlan = async () => {
     try {
@@ -43,48 +58,81 @@ export default function DetoxPlanScreen() {
   };
 
   const currentDay = useMemo(() => {
-    return plan?.days?.find((day) => day.status !== 'completed') || plan?.days?.[0] || null;
+    if (!plan?.days?.length) return null;
+
+    return (
+      plan.days.find((day) => day.dayNumber === plan.currentDayNumber) ||
+      plan.days.find((day) => day.status === 'in_progress') ||
+      plan.days.find((day) => day.status !== 'completed') ||
+      plan.days[0]
+    );
   }, [plan]);
-
-  const totalDays = plan?.days?.length || 0;
-  const completedDays =
-    plan?.days?.filter((day) => day.status === 'completed').length || 0;
-  const totalTasks =
-    plan?.days?.reduce((sum, day) => sum + (day.tasks?.length || 0), 0) || 0;
-  const completedTasks =
-    plan?.days?.reduce(
-      (sum, day) =>
-        sum + (day.tasks?.filter((task) => task.status === 'completed').length || 0),
-      0
-    ) || 0;
-
-  const currentTasks = currentDay?.tasks || [];
-  const currentDone = currentTasks.filter((task) => task.status === 'completed').length;
-  const currentTotal = currentTasks.length;
 
   const completeTask = async (taskId?: string) => {
     if (!plan?._id || !taskId) return;
 
     try {
+      setCompletingTaskId(taskId);
+
       const res = await api.completePlanTask(plan._id, taskId);
       setPlan(res.plan);
 
-      if ((res.newBadges || []).length) {
-        Alert.alert(
-          'Badge unlocked',
-          `You unlocked: ${(res.newBadges || []).join(', ')}`
-        );
+      const completion = res.completion;
+      const badgeText =
+        (res.newBadges || []).length > 0
+          ? `\n\nNew badges: ${(res.newBadges || []).join(', ')}`
+          : '';
+
+      if (completion) {
+        const parts = [
+          `Task completed: ${completion.taskTitle}`,
+          `+${completion.basePointsEarned} points`,
+        ];
+
+        if (completion.dayBonusPoints > 0) {
+          parts.push(`Day completion bonus: +${completion.dayBonusPoints}`);
+        }
+
+        if (completion.planBonusPoints > 0) {
+          parts.push(`Plan completion bonus: +${completion.planBonusPoints}`);
+        }
+
+        parts.push(`Total earned now: +${completion.totalPointsEarned}`);
+
+        if (completion.dayCompleted && completion.completedDayNumber) {
+          parts.push(`Day ${completion.completedDayNumber} completed`);
+        }
+
+        if (completion.planCompleted) {
+          parts.push('Full detox plan completed');
+        }
+
+        Alert.alert('Progress updated', `${parts.join('\n')}${badgeText}`);
+      } else if (badgeText) {
+        Alert.alert('Badge unlocked', badgeText.trim());
       }
+
+      await loadPlan();
     } catch (error: any) {
       Alert.alert('Task update failed', error.message || 'Could not update task');
+    } finally {
+      setCompletingTaskId(null);
     }
   };
 
   return (
-    <Screen>
+    <Screen
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={loadPlan}
+          tintColor="#ffffff"
+        />
+      }
+    >
       <Text style={styles.title}>AI Detox Plan</Text>
       <Text style={styles.subtitle}>
-        Personalized recovery tasks, usage limits, and healthy routines
+        Personalized recovery tasks, completed-day tracking, and reward progress
       </Text>
 
       {!plan ? (
@@ -102,6 +150,7 @@ export default function DetoxPlanScreen() {
             <Text style={styles.cardText}>
               {plan.planSummary || 'Reduce distractions and improve focus.'}
             </Text>
+
             <Text style={styles.meta}>Start: {formatShortDate(plan.startDate)}</Text>
             <Text style={styles.meta}>End: {formatShortDate(plan.endDate)}</Text>
             <Text style={styles.meta}>
@@ -111,82 +160,120 @@ export default function DetoxPlanScreen() {
               AI insight: {plan.aiInsight || 'No AI insight yet.'}
             </Text>
 
+            <View style={styles.summaryRow}>
+              <View style={styles.summaryBox}>
+                <Text style={styles.summaryValue}>{plan.completedDays ?? 0}</Text>
+                <Text style={styles.summaryLabel}>Days Done</Text>
+              </View>
+
+              <View style={styles.summaryBox}>
+                <Text style={styles.summaryValue}>{plan.completedTasks ?? 0}</Text>
+                <Text style={styles.summaryLabel}>Tasks Done</Text>
+              </View>
+
+              <View style={styles.summaryBox}>
+                <Text style={styles.summaryValue}>{plan.totalDays ?? 0}</Text>
+                <Text style={styles.summaryLabel}>Total Days</Text>
+              </View>
+            </View>
+
             <View style={{ marginTop: 14 }}>
-              <ProgressBar value={progressPercent(completedTasks, totalTasks)} />
+              <ProgressBar value={plan.overallProgressPct ?? 0} />
               <Text style={styles.progressText}>
-                {completedTasks}/{totalTasks} tasks completed • {completedDays}/{totalDays} days finished
+                {plan.completedTasks ?? 0}/{plan.totalTasks ?? 0} tasks completed •{' '}
+                {plan.completedDays ?? 0}/{plan.totalDays ?? 0} days finished
               </Text>
             </View>
-          </View>
 
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Current Day</Text>
-            <Text style={styles.cardText}>
-              Day {currentDay?.dayNumber ?? 1} • Target {currentDay?.targetLimitMinutes ?? 0} min
+            <Text style={styles.planState}>
+              Plan status: {plan.status === 'completed' ? 'Completed ✅' : 'Active 🟣'}
             </Text>
-
-            <View style={{ marginTop: 12 }}>
-              <ProgressBar value={progressPercent(currentDone, currentTotal)} />
-              <Text style={styles.progressText}>
-                {currentDone}/{currentTotal} tasks completed today
-              </Text>
-            </View>
-
-            {currentTasks.map((task, index) => {
-              const completed = task.status === 'completed';
-
-              return (
-                <Pressable
-                  key={task._id || `${task.title}-${index}`}
-                  style={[styles.task, completed && styles.taskDone]}
-                  onPress={() => completeTask(task._id)}
-                >
-                  <Text style={styles.taskTitle}>
-                    {completed ? '✅' : task.status === 'in_progress' ? '🟣' : '⬜'} {task.title}
-                  </Text>
-
-                  {!!task.targetTime && (
-                    <Text style={styles.taskText}>Target time: {task.targetTime}</Text>
-                  )}
-
-                  {!!task.type && (
-                    <Text style={styles.taskText}>Type: {task.type}</Text>
-                  )}
-
-                  {!completed && (
-                    <Text style={styles.tapHint}>Tap to mark completed</Text>
-                  )}
-                </Pressable>
-              );
-            })}
-
-            {!currentTasks.length && (
-              <Text style={styles.cardText}>No tasks available yet.</Text>
-            )}
           </View>
+
+          {!!currentDay && (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Current Day Focus</Text>
+              <Text style={styles.cardText}>
+                Day {currentDay.dayNumber} • Target {currentDay.targetLimitMinutes ?? 0} min
+              </Text>
+              <Text style={styles.meta}>
+                Status: {dayStatusLabel(currentDay.status)}
+              </Text>
+
+              <View style={{ marginTop: 12 }}>
+                <ProgressBar value={currentDay.progressPct ?? 0} />
+                <Text style={styles.progressText}>
+                  {currentDay.completedTasks ?? 0}/{currentDay.totalTasks ?? 0} tasks completed today
+                </Text>
+              </View>
+
+              {(currentDay.tasks || []).map((task, index) => {
+                const completed = task.status === 'completed';
+
+                return (
+                  <Pressable
+                    key={task._id || `${task.title}-${index}`}
+                    style={[styles.task, completed && styles.taskDone]}
+                    onPress={() => completeTask(task._id)}
+                    disabled={completed || completingTaskId === task._id}
+                  >
+                    <Text style={styles.taskTitle}>
+                      {taskStatusIcon(task.status)} {task.title}
+                    </Text>
+
+                    {!!task.targetTime && (
+                      <Text style={styles.taskText}>Target time: {task.targetTime}</Text>
+                    )}
+
+                    {!!task.type && (
+                      <Text style={styles.taskText}>Type: {task.type}</Text>
+                    )}
+
+                    <Text style={styles.taskReward}>
+                      Reward: +{task.pointsReward ?? 0} points
+                    </Text>
+
+                    {!completed && (
+                      <Text style={styles.tapHint}>
+                        {completingTaskId === task._id
+                          ? 'Updating...'
+                          : 'Tap to mark completed'}
+                      </Text>
+                    )}
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
 
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Plan Timeline</Text>
-            {plan.days.slice(0, 7).map((day) => (
-              <View key={`day-${day.dayNumber}`} style={styles.timelineRow}>
+
+            {(plan.days || []).map((day) => (
+              <View
+                key={`day-${day.dayNumber}`}
+                style={[
+                  styles.timelineRow,
+                  day.status === 'in_progress' && styles.timelineRowActive,
+                  day.status === 'completed' && styles.timelineRowDone,
+                ]}
+              >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.timelineTitle}>Day {day.dayNumber}</Text>
                   <Text style={styles.timelineMeta}>
                     {formatShortDate(day.date)} • Target {day.targetLimitMinutes} min
                   </Text>
+                  <Text style={styles.timelineMeta}>
+                    {day.completedTasks ?? 0}/{day.totalTasks ?? 0} tasks completed
+                  </Text>
                 </View>
-                <Text style={styles.timelineStatus}>
-                  {day.status === 'completed'
-                    ? 'Completed'
-                    : day.status === 'in_progress'
-                    ? 'In Progress'
-                    : 'Pending'}
-                </Text>
+
+                <View style={styles.timelineRight}>
+                  <Text style={styles.timelineStatus}>{dayStatusLabel(day.status)}</Text>
+                  <Text style={styles.timelinePct}>{day.progressPct ?? 0}%</Text>
+                </View>
               </View>
             ))}
-            {plan.days.length > 7 && (
-              <Text style={styles.meta}>Showing first 7 days of the full 21-day plan.</Text>
-            )}
           </View>
 
           <PrimaryButton
@@ -233,9 +320,37 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     marginTop: 8,
   },
+  summaryRow: {
+    flexDirection: 'row',
+    marginTop: 14,
+  },
+  summaryBox: {
+    flex: 1,
+    backgroundColor: '#0F172A',
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    marginRight: 8,
+  },
+  summaryValue: {
+    color: '#A5B4FC',
+    fontWeight: '800',
+    fontSize: 20,
+  },
+  summaryLabel: {
+    color: '#94A3B8',
+    marginTop: 6,
+    fontSize: 12,
+  },
   progressText: {
     color: '#CBD5E1',
     marginTop: 8,
+  },
+  planState: {
+    color: '#FDE68A',
+    marginTop: 12,
+    fontWeight: '700',
   },
   task: {
     backgroundColor: '#0F172A',
@@ -256,6 +371,11 @@ const styles = StyleSheet.create({
     color: '#CBD5E1',
     marginTop: 6,
   },
+  taskReward: {
+    color: '#86EFAC',
+    marginTop: 8,
+    fontWeight: '700',
+  },
   tapHint: {
     color: '#A5B4FC',
     marginTop: 8,
@@ -265,9 +385,15 @@ const styles = StyleSheet.create({
   timelineRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 10,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#1F2937',
+  },
+  timelineRowActive: {
+    backgroundColor: 'rgba(79,70,229,0.08)',
+  },
+  timelineRowDone: {
+    backgroundColor: 'rgba(34,197,94,0.06)',
   },
   timelineTitle: {
     color: '#fff',
@@ -278,9 +404,19 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontSize: 12,
   },
+  timelineRight: {
+    alignItems: 'flex-end',
+    marginLeft: 12,
+  },
   timelineStatus: {
     color: '#A5B4FC',
     fontWeight: '700',
     fontSize: 12,
+  },
+  timelinePct: {
+    color: '#CBD5E1',
+    marginTop: 6,
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

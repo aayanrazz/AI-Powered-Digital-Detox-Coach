@@ -6,6 +6,22 @@ export interface BadgeItem {
   earnedAt?: string;
 }
 
+export interface BadgeDisplayItem {
+  key: string;
+  label: string;
+  emoji?: string;
+  description?: string;
+  earnedAt?: string | null;
+}
+
+export interface NextBadgeHint {
+  key: string;
+  label: string;
+  emoji?: string;
+  description?: string;
+  hint?: string;
+}
+
 export interface User {
   _id?: string;
   id?: string;
@@ -48,6 +64,17 @@ export interface UsageApp {
   category?: string;
 }
 
+export interface AppLimitStatusItem {
+  appName: string;
+  appPackage: string;
+  category?: string;
+  usedMinutes: number;
+  dailyLimitMinutes: number;
+  exceededMinutes: number;
+  remainingMinutes: number;
+  isExceeded: boolean;
+}
+
 export interface DashboardData {
   welcomeName?: string;
   focusScore?: number;
@@ -59,24 +86,62 @@ export interface DashboardData {
   dailyGoal?: number;
   dailyChallenge?: string;
   aiRecommendations?: string[];
+
+  overLimitAppsCount?: number;
+  topExceededAppName?: string;
+  topExceededMinutes?: number;
+  interventionMessage?: string;
+
+  currentLevelNumber?: number;
+  currentLevelTitle?: string;
+  progressPct?: number;
+  pointsToNextLevel?: number;
+
+  badgesCount?: number;
+  latestBadgeLabel?: string;
+  latestBadgeEmoji?: string;
+  nextBadgeHintText?: string;
 }
 
 export interface AnalyticsCategory {
   category: string;
   minutes: number;
+  sharePct?: number;
+}
+
+export interface AnalyticsTrendPoint {
+  label: string;
+  shortLabel?: string;
+  minutes: number;
+}
+
+export interface AnalyticsComparison {
+  usageChangePct: number;
+  pickupChangePct: number;
+  unlockChangePct: number;
+  direction: 'improving' | 'worsening' | 'steady';
+  summary: string;
 }
 
 export interface AnalyticsData {
   focusScore?: number;
   totalUsageMinutes?: number;
+  averageDailyMinutes?: number;
   pickupCount?: number;
   unlockCount?: number;
   lateNightMinutes?: number;
   peakHour?: number;
+  peakHourLabel?: string;
+  trendLabel?: string;
+  trendPoints?: AnalyticsTrendPoint[];
   weeklyTrend?: string;
   recommendations?: string[];
   riskLevel?: string;
   categoryBreakdown?: AnalyticsCategory[];
+  comparison?: AnalyticsComparison;
+  totalActiveDays?: number;
+  bestDayLabel?: string;
+  worstDayLabel?: string;
 }
 
 export interface DetoxTask {
@@ -86,6 +151,7 @@ export interface DetoxTask {
   status?: 'pending' | 'in_progress' | 'completed';
   targetTime?: string;
   completedAt?: string | null;
+  pointsReward?: number;
 }
 
 export interface DetoxPlanDay {
@@ -94,6 +160,9 @@ export interface DetoxPlanDay {
   targetLimitMinutes: number;
   status?: 'pending' | 'in_progress' | 'completed';
   tasks: DetoxTask[];
+  totalTasks?: number;
+  completedTasks?: number;
+  progressPct?: number;
 }
 
 export interface DetoxPlan {
@@ -106,7 +175,40 @@ export interface DetoxPlan {
   planSummary?: string;
   active?: boolean;
   days: DetoxPlanDay[];
+  totalDays?: number;
+  completedDays?: number;
+  pendingDays?: number;
+  totalTasks?: number;
+  completedTasks?: number;
+  overallProgressPct?: number;
+  currentDayNumber?: number | null;
+  status?: 'active' | 'completed';
 }
+
+export interface PlanTaskCompletion {
+  taskTitle: string;
+  taskType?: string;
+  basePointsEarned: number;
+  dayBonusPoints: number;
+  planBonusPoints: number;
+  totalPointsEarned: number;
+  dayCompleted: boolean;
+  planCompleted: boolean;
+  completedDayNumber?: number | null;
+}
+
+export type NotificationCtaAction =
+  | 'open_rewards'
+  | 'open_detox_plan'
+  | 'open_usage_tab'
+  | 'open_analytics_tab'
+  | 'open_profile_setup'
+  | 'open_settings'
+  | 'wind_down'
+  | 'open_notifications'
+  | 'open_home'
+  | 'start_break'
+  | 'show_message';
 
 export interface NotificationItem {
   _id?: string;
@@ -116,7 +218,7 @@ export interface NotificationItem {
   read?: boolean;
   createdAt?: string;
   ctaLabel?: string;
-  ctaAction?: string;
+  ctaAction?: NotificationCtaAction;
 }
 
 export interface RewardItem {
@@ -143,7 +245,7 @@ export interface LeaderboardItem {
 export interface RewardsSummary {
   points?: number;
   streak?: number;
-  badges?: string[];
+  badges?: BadgeDisplayItem[];
   rewards?: RewardItem[];
   levelTitle?: string;
   levelNumber?: number;
@@ -152,6 +254,11 @@ export interface RewardsSummary {
   progressPct?: number;
   recentActivity?: RewardActivityItem[];
   leaderboard?: LeaderboardItem[];
+  unlockedBadgesCount?: number;
+  totalBadges?: number;
+  badgeCompletionPct?: number;
+  latestBadge?: BadgeDisplayItem | null;
+  nextBadgeHint?: NextBadgeHint | null;
 }
 
 export interface AppLimitItem {

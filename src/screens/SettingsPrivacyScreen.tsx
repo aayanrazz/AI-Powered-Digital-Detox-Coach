@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   Alert,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Switch,
   Text,
@@ -13,6 +14,17 @@ import PrimaryButton from '../components/PrimaryButton';
 import { api } from '../api/api';
 import { SettingsData, ThemeMode } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
+import { syncDetoxNotifications } from '../services/notificationSyncService';
+
+const FOCUS_OPTIONS = [
+  'Social Media',
+  'Productivity',
+  'Gaming',
+  'Streaming',
+  'Study',
+  'Sleep',
+];
 
 function parseFocusAreas(input: string) {
   return input
@@ -21,10 +33,20 @@ function parseFocusAreas(input: string) {
     .filter(Boolean);
 }
 
-export default function SettingsPrivacyScreen() {
-  const { logout } = useAuth();
+function normalizeTime(value: string | undefined, fallback: string) {
+  const trimmed = String(value || '').trim();
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
 
-  const [settings, setSettings] = useState<SettingsData>({
+  if (!match) return fallback;
+
+  const hours = Math.max(0, Math.min(23, Number(match[1])));
+  const minutes = Math.max(0, Math.min(59, Number(match[2])));
+
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function createDefaultSettings(): SettingsData {
+  return {
     notificationsEnabled: true,
     aiInterventionsEnabled: true,
     privacyModeEnabled: false,
@@ -41,54 +63,123 @@ export default function SettingsPrivacyScreen() {
     appleHealthConnected: false,
     theme: 'dark',
     appLimits: [],
-  });
+  };
+}
 
-  const [focusAreasText, setFocusAreasText] = useState(
-    'Social Media, Productivity'
-  );
-  const [loading, setLoading] = useState(false);
+export default function SettingsPrivacyScreen() {
+  const { logout } = useAuth();
 
-  const load = async () => {
+  const [settings, setSettings] = useState<SettingsData>(createDefaultSettings());
+  const [selectedFocusAreas, setSelectedFocusAreas] = useState<string[]>([
+    'Social Media',
+    'Productivity',
+  ]);
+  const [customFocusAreas, setCustomFocusAreas] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
     try {
+      setRefreshing(true);
       const res = await api.getSettings();
-      if (res.settings) {
-        setSettings(res.settings);
-        setFocusAreasText((res.settings.focusAreas || []).join(', '));
+
+      if (res?.settings) {
+        const mergedSettings: SettingsData = {
+          ...createDefaultSettings(),
+          ...res.settings,
+          focusAreas:
+            Array.isArray(res.settings.focusAreas) && res.settings.focusAreas.length
+              ? res.settings.focusAreas
+              : ['Social Media', 'Productivity'],
+          appLimits: Array.isArray(res.settings.appLimits)
+            ? res.settings.appLimits
+            : [],
+        };
+
+        setSettings(mergedSettings);
+
+        const focusAreas = mergedSettings.focusAreas || [];
+        setSelectedFocusAreas(
+          focusAreas.filter((item) => FOCUS_OPTIONS.includes(item))
+        );
+        setCustomFocusAreas(
+          focusAreas.filter((item) => !FOCUS_OPTIONS.includes(item)).join(', ')
+        );
       }
     } catch (error: any) {
       Alert.alert('Settings error', error.message || 'Failed to load settings');
+    } finally {
+      setRefreshing(false);
     }
-  };
-
-  useEffect(() => {
-    load();
   }, []);
+
+  useRefreshOnFocus(load);
+
+  const finalFocusAreas = useMemo(() => {
+    const custom = parseFocusAreas(customFocusAreas);
+    const merged = Array.from(
+      new Set([...(selectedFocusAreas || []), ...custom])
+    ).slice(0, 5);
+
+    return merged.length ? merged : ['Social Media'];
+  }, [selectedFocusAreas, customFocusAreas]);
+
+  const toggleFocusArea = (item: string) => {
+    setSelectedFocusAreas((prev) =>
+      prev.includes(item) ? prev.filter((x) => x !== item) : [...prev, item]
+    );
+  };
 
   const save = async () => {
     try {
-      setLoading(true);
+      setSaving(true);
 
-      await api.updateSettings({
+      const payload: SettingsData = {
         ...settings,
-        focusAreas: parseFocusAreas(focusAreasText),
-      });
+        dailyLimitMinutes: Math.max(
+          60,
+          Math.min(1440, Number(settings.dailyLimitMinutes || 180))
+        ),
+        focusAreas: finalFocusAreas,
+        bedTime: normalizeTime(settings.bedTime, '23:00'),
+        wakeTime: normalizeTime(settings.wakeTime, '07:00'),
+        appLimits: Array.isArray(settings.appLimits) ? settings.appLimits : [],
+      };
 
-      Alert.alert('Success', 'Settings saved');
+      await api.updateSettings(payload);
+      await syncDetoxNotifications();
+
+      Alert.alert(
+        'Success',
+        'Settings saved. Real device reminders and detox alerts have been refreshed.'
+      );
+
+      await load();
     } catch (error: any) {
       Alert.alert('Save failed', error.message || 'Could not save settings');
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
   return (
-    <Screen>
+    <Screen
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={load}
+          tintColor="#ffffff"
+        />
+      }
+    >
       <Text style={styles.title}>Settings & Privacy</Text>
       <Text style={styles.subtitle}>
-        Control notifications, privacy, sleep targets, theme, and daily limits
+        Fine-tune the preferences that shape your detox plan and dashboard coaching
       </Text>
 
       <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Notification Preferences</Text>
+
         <RowSwitch
           label="Daily summaries"
           value={!!settings.notificationsEnabled}
@@ -120,6 +211,8 @@ export default function SettingsPrivacyScreen() {
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Privacy</Text>
+
         <RowSwitch
           label="Anonymize data"
           value={!!settings.anonymizeData}
@@ -141,6 +234,8 @@ export default function SettingsPrivacyScreen() {
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Behavior Preferences</Text>
+
         <Text style={styles.label}>Daily Limit (minutes)</Text>
         <TextInput
           style={styles.input}
@@ -157,13 +252,35 @@ export default function SettingsPrivacyScreen() {
         />
 
         <Text style={styles.label}>Focus Areas</Text>
+        <View style={styles.chipRow}>
+          {FOCUS_OPTIONS.map((item) => {
+            const active = selectedFocusAreas.includes(item);
+
+            return (
+              <Pressable
+                key={item}
+                style={[styles.chip, active && styles.chipActive]}
+                onPress={() => toggleFocusArea(item)}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                  {item}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
         <TextInput
-          style={styles.input}
-          value={focusAreasText}
-          onChangeText={setFocusAreasText}
-          placeholder="Social Media, Productivity"
+          style={[styles.input, { marginTop: 12 }]}
+          value={customFocusAreas}
+          onChangeText={setCustomFocusAreas}
+          placeholder="Extra focus areas (comma separated)"
           placeholderTextColor="#64748B"
         />
+
+        <Text style={styles.helper}>
+          Applied focus areas: {finalFocusAreas.join(', ')}
+        </Text>
 
         <Text style={styles.label}>Bed Time</Text>
         <TextInput
@@ -189,7 +306,7 @@ export default function SettingsPrivacyScreen() {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.label}>Theme</Text>
+        <Text style={styles.sectionTitle}>Theme</Text>
         <View style={styles.themeRow}>
           {(['dark', 'light', 'system'] as ThemeMode[]).map((item) => (
             <Pressable
@@ -218,7 +335,24 @@ export default function SettingsPrivacyScreen() {
         </View>
       </View>
 
-      <PrimaryButton title="Save Settings" onPress={save} loading={loading} />
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Preview</Text>
+        <Text style={styles.previewText}>
+          Dashboard goal: {settings.dailyLimitMinutes ?? 180} minutes
+        </Text>
+        <Text style={styles.previewText}>
+          Coaching focus: {finalFocusAreas.join(', ')}
+        </Text>
+        <Text style={styles.previewText}>
+          Sleep routine: {settings.bedTime || '23:00'} → {settings.wakeTime || '07:00'}
+        </Text>
+        <Text style={styles.previewText}>
+          Nudges: {settings.aiInterventionsEnabled ? 'On' : 'Off'} • Summaries:{' '}
+          {settings.notificationsEnabled ? 'On' : 'Off'}
+        </Text>
+      </View>
+
+      <PrimaryButton title="Save Settings" onPress={save} loading={saving} />
       <PrimaryButton title="Logout" onPress={logout} variant="secondary" />
     </Screen>
   );
@@ -260,6 +394,12 @@ const styles = StyleSheet.create({
     borderColor: '#1F2937',
     marginBottom: 12,
   },
+  sectionTitle: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 17,
+    marginBottom: 10,
+  },
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -274,6 +414,7 @@ const styles = StyleSheet.create({
     color: '#E2E8F0',
     marginBottom: 10,
     fontWeight: '700',
+    marginTop: 8,
   },
   input: {
     backgroundColor: '#0F172A',
@@ -284,6 +425,37 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 14,
     marginBottom: 12,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  chip: {
+    backgroundColor: '#0F172A',
+    borderColor: '#1E293B',
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  chipActive: {
+    backgroundColor: '#4F46E5',
+    borderColor: '#4F46E5',
+  },
+  chipText: {
+    color: '#CBD5E1',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  chipTextActive: {
+    color: '#fff',
+  },
+  helper: {
+    color: '#94A3B8',
+    fontSize: 12,
+    marginBottom: 4,
   },
   themeRow: {
     flexDirection: 'row',
@@ -308,5 +480,9 @@ const styles = StyleSheet.create({
   },
   themeTextActive: {
     color: '#fff',
+  },
+  previewText: {
+    color: '#CBD5E1',
+    marginBottom: 6,
   },
 });

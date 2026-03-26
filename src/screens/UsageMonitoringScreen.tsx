@@ -1,33 +1,127 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  AppState,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import Screen from '../components/Screen';
 import PrimaryButton from '../components/PrimaryButton';
 import { usageTracker } from '../native/usageTracker';
-import { UsageApp } from '../types';
+import { AppLimitStatusItem, UsageApp } from '../types';
 import { api } from '../api/api';
 import { formatMinutes } from '../utils/helpers';
+import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
 
-export default function UsageMonitoringScreen() {
+export default function UsageMonitoringScreen({ navigation }: any) {
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [apps, setApps] = useState<UsageApp[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [savingPackage, setSavingPackage] = useState<string | null>(null);
+  const [limitStatuses, setLimitStatuses] = useState<AppLimitStatusItem[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [serverTotalMinutes, setServerTotalMinutes] = useState(0);
+  const [lastSyncMessage, setLastSyncMessage] = useState('');
 
-  const checkPermission = async () => {
-    const granted = await usageTracker.isPermissionGranted();
-    setPermissionGranted(granted);
-  };
+  const limitMap = useMemo(
+    () =>
+      limitStatuses.reduce<Record<string, AppLimitStatusItem>>((acc, item) => {
+        acc[item.appPackage] = item;
+        return acc;
+      }, {}),
+    [limitStatuses]
+  );
+
+  const checkPermission = useCallback(async () => {
+    try {
+      const granted = await usageTracker.isPermissionGranted();
+      setPermissionGranted(granted);
+    } catch {
+      setPermissionGranted(false);
+    }
+  }, []);
+
+  const loadServerUsage = useCallback(async () => {
+    try {
+      const res = await api.getTodayUsage();
+      setServerTotalMinutes(res.totalMinutes || 0);
+
+      if (!apps.length && (res.apps || []).length) {
+        setApps(res.apps.sort((a, b) => b.minutesUsed - a.minutesUsed));
+      }
+    } catch {
+      // keep local state
+    }
+  }, [apps.length]);
+
+  const refreshAll = useCallback(async () => {
+    try {
+      setRefreshing(true);
+      await checkPermission();
+      await loadServerUsage();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [checkPermission, loadServerUsage]);
+
+  useRefreshOnFocus(refreshAll);
 
   useEffect(() => {
-    checkPermission();
-  }, []);
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        void checkPermission();
+        void loadServerUsage();
+      }
+    });
+
+    return () => sub.remove();
+  }, [checkPermission, loadServerUsage]);
+
+  const openUsageAccess = async () => {
+    try {
+      await usageTracker.openPermissionSettings();
+
+      setTimeout(() => {
+        void checkPermission();
+      }, 800);
+    } catch (error: any) {
+      Alert.alert(
+        'Permission error',
+        error.message || 'Could not open Android usage access settings'
+      );
+    }
+  };
 
   const loadUsage = async () => {
     try {
       setLoading(true);
+
+      const granted = await usageTracker.isPermissionGranted();
+      setPermissionGranted(granted);
+
+      if (!granted) {
+        Alert.alert(
+          'Usage access required',
+          'Grant Android usage access first, then tap Read Today Usage again.'
+        );
+        return;
+      }
+
       const result = await usageTracker.getTodayUsage();
-      setApps(result.sort((a, b) => b.minutesUsed - a.minutesUsed));
+      const sorted = result.sort((a, b) => b.minutesUsed - a.minutesUsed);
+      setApps(sorted);
+
+      if (!sorted.length) {
+        Alert.alert(
+          'No usage found',
+          'Open a few apps on your phone or emulator, come back here, then tap Read Today Usage again.'
+        );
+      }
     } catch (error: any) {
       Alert.alert('Usage error', error.message || 'Could not read device usage');
     } finally {
@@ -38,13 +132,51 @@ export default function UsageMonitoringScreen() {
   const syncToServer = async () => {
     try {
       if (!apps.length) {
-        Alert.alert('No data', 'Load usage data first');
+        Alert.alert('No data', 'Load usage data first.');
         return;
       }
 
       setSyncing(true);
-      await api.ingestUsage({ apps });
-      Alert.alert('Success', 'Usage synced to backend successfully');
+      const res = await api.ingestUsage({ apps });
+
+      const monitoredApps = res.appLimitSummary?.monitoredApps || [];
+      const exceededApps = res.appLimitSummary?.exceededApps || [];
+      const exceededCount = res.appLimitSummary?.exceededCount || 0;
+
+      setLimitStatuses(monitoredApps);
+      setLastSyncMessage(
+        `${res.syncedCount} app records synced successfully to backend.`
+      );
+
+      await loadServerUsage();
+
+      if (exceededCount > 0) {
+        const top = exceededApps[0];
+
+        Alert.alert(
+          'Usage synced',
+          `${res.syncedCount} app records synced.\n\n${exceededCount} app(s) passed their daily limit.${
+            top
+              ? `\n\nTop over-limit app: ${top.appName}\nExceeded by: ${top.exceededMinutes} minutes`
+              : ''
+          }`,
+          [
+            {
+              text: 'Open Notifications',
+              onPress: () => navigation.navigate('Notifications'),
+            },
+            {
+              text: 'Stay Here',
+              style: 'cancel',
+            },
+          ]
+        );
+      } else {
+        Alert.alert(
+          'Usage synced',
+          `${res.syncedCount} app records synced successfully. No app limits were exceeded.`
+        );
+      }
     } catch (error: any) {
       Alert.alert('Sync failed', error.message || 'Could not sync usage data');
     } finally {
@@ -63,6 +195,27 @@ export default function UsageMonitoringScreen() {
         dailyLimitMinutes: minutes,
       });
 
+      const usedMinutes = Number(app.minutesUsed ?? 0);
+      const exceededMinutes = Math.max(0, usedMinutes - minutes);
+      const remainingMinutes = Math.max(0, minutes - usedMinutes);
+
+      setLimitStatuses((prev) => {
+        const next = prev.filter((item) => item.appPackage !== app.packageName);
+
+        next.push({
+          appName: app.appName || app.packageName,
+          appPackage: app.packageName,
+          category: app.category || 'Other',
+          usedMinutes,
+          dailyLimitMinutes: minutes,
+          exceededMinutes,
+          remainingMinutes,
+          isExceeded: exceededMinutes > 0,
+        });
+
+        return next.sort((a, b) => b.usedMinutes - a.usedMinutes);
+      });
+
       Alert.alert('Limit saved', `${minutes} minute limit saved for ${app.appName}`);
     } catch (error: any) {
       Alert.alert('Limit failed', error.message || 'Could not save app limit');
@@ -71,24 +224,34 @@ export default function UsageMonitoringScreen() {
     }
   };
 
+  const deviceTotalMinutes = apps.reduce(
+    (sum, item) => sum + Number(item.minutesUsed || 0),
+    0
+  );
+
   return (
-    <Screen>
+    <Screen
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={refreshAll}
+          tintColor="#ffffff"
+        />
+      }
+    >
       <Text style={styles.title}>Usage Monitoring</Text>
       <Text style={styles.subtitle}>
-        Track daily app usage, sync it to backend AI, and save quick limits
+        Read Android usage stats, sync them to backend, and review app-limit behavior
       </Text>
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Usage Access Permission</Text>
         <Text style={styles.cardText}>
-          {permissionGranted ? 'Granted ' : 'Not granted ❌'}
+          {permissionGranted ? 'Granted ✅' : 'Not granted ❌'}
         </Text>
 
         {!permissionGranted && (
-          <PrimaryButton
-            title="Grant Usage Access"
-            onPress={() => usageTracker.openPermissionSettings()}
-          />
+          <PrimaryButton title="Grant Usage Access" onPress={openUsageAccess} />
         )}
 
         <PrimaryButton
@@ -99,7 +262,18 @@ export default function UsageMonitoringScreen() {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Device Usage Collection</Text>
+        <Text style={styles.cardTitle}>Usage Sync Status</Text>
+        <Text style={styles.cardText}>
+          Device usage loaded: {formatMinutes(deviceTotalMinutes)}
+        </Text>
+        <Text style={styles.cardText}>
+          Backend synced total: {formatMinutes(serverTotalMinutes)}
+        </Text>
+
+        {!!lastSyncMessage && (
+          <Text style={styles.syncNote}>{lastSyncMessage}</Text>
+        )}
+
         <PrimaryButton title="Read Today Usage" onPress={loadUsage} loading={loading} />
         <PrimaryButton
           title="Sync To Backend"
@@ -114,39 +288,67 @@ export default function UsageMonitoringScreen() {
       <FlatList
         data={apps}
         keyExtractor={(item, index) => `${item.packageName}-${index}`}
-        renderItem={({ item }) => (
-          <View style={styles.item}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.appName}>{item.appName || item.packageName}</Text>
-              <Text style={styles.packageName}>{item.packageName}</Text>
-              <Text style={styles.meta}>
-                Category: {item.category || 'Other'}
-              </Text>
-            </View>
+        renderItem={({ item }) => {
+          const limitStatus = limitMap[item.packageName];
 
-            <View style={styles.rightCol}>
-              <Text style={styles.minutes}>{formatMinutes(item.minutesUsed)}</Text>
+          return (
+            <View style={styles.item}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.appName}>{item.appName || item.packageName}</Text>
+                <Text style={styles.packageName}>{item.packageName}</Text>
+                <Text style={styles.meta}>
+                  Category: {item.category || 'Other'}
+                </Text>
 
-              <View style={styles.limitRow}>
-                <Pressable
-                  style={styles.limitBtn}
-                  onPress={() => saveQuickLimit(item, 30)}
-                  disabled={savingPackage === item.packageName}
-                >
-                  <Text style={styles.limitBtnText}>30m limit</Text>
-                </Pressable>
+                {limitStatus ? (
+                  <>
+                    <Text style={styles.limitMeta}>
+                      Limit: {limitStatus.dailyLimitMinutes} min • Used:{' '}
+                      {limitStatus.usedMinutes} min
+                    </Text>
 
-                <Pressable
-                  style={styles.limitBtn}
-                  onPress={() => saveQuickLimit(item, 60)}
-                  disabled={savingPackage === item.packageName}
-                >
-                  <Text style={styles.limitBtnText}>60m limit</Text>
-                </Pressable>
+                    <Text
+                      style={[
+                        styles.limitStatus,
+                        limitStatus.isExceeded ? styles.overLimit : styles.withinLimit,
+                      ]}
+                    >
+                      {limitStatus.isExceeded
+                        ? `Over limit by ${limitStatus.exceededMinutes} min`
+                        : `${limitStatus.remainingMinutes} min remaining`}
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={styles.limitHint}>
+                    Save a limit and sync to get intervention feedback
+                  </Text>
+                )}
+              </View>
+
+              <View style={styles.rightCol}>
+                <Text style={styles.minutes}>{formatMinutes(item.minutesUsed)}</Text>
+
+                <View style={styles.limitRow}>
+                  <Pressable
+                    style={styles.limitBtn}
+                    onPress={() => saveQuickLimit(item, 30)}
+                    disabled={savingPackage === item.packageName}
+                  >
+                    <Text style={styles.limitBtnText}>30m limit</Text>
+                  </Pressable>
+
+                  <Pressable
+                    style={styles.limitBtn}
+                    onPress={() => saveQuickLimit(item, 60)}
+                    disabled={savingPackage === item.packageName}
+                  >
+                    <Text style={styles.limitBtnText}>60m limit</Text>
+                  </Pressable>
+                </View>
               </View>
             </View>
-          </View>
-        )}
+          );
+        }}
         ListEmptyComponent={<Text style={styles.empty}>No usage loaded yet</Text>}
         scrollEnabled={false}
       />
@@ -175,38 +377,46 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 8,
+    fontWeight: '800',
+    fontSize: 18,
+    marginBottom: 10,
   },
   cardText: {
     color: '#CBD5E1',
-    marginBottom: 8,
+    lineHeight: 20,
+  },
+  syncNote: {
+    color: '#A5B4FC',
+    marginTop: 8,
+    marginBottom: 4,
+    fontWeight: '700',
   },
   sectionTitle: {
-    color: '#fff',
-    fontSize: 18,
+    color: '#E2E8F0',
     fontWeight: '800',
-    marginTop: 8,
-    marginBottom: 10,
+    fontSize: 18,
+    marginTop: 6,
+    marginBottom: 12,
   },
   item: {
-    flexDirection: 'row',
-    backgroundColor: '#0F172A',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 10,
+    backgroundColor: '#111827',
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: '#1E293B',
+    borderColor: '#1F2937',
+    padding: 14,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   appName: {
     color: '#fff',
     fontWeight: '700',
+    fontSize: 16,
   },
   packageName: {
-    color: '#64748B',
-    marginTop: 4,
+    color: '#94A3B8',
     fontSize: 12,
+    marginTop: 4,
   },
   meta: {
     color: '#94A3B8',
@@ -215,33 +425,54 @@ const styles = StyleSheet.create({
   },
   rightCol: {
     alignItems: 'flex-end',
-    justifyContent: 'space-between',
+    marginLeft: 12,
   },
   minutes: {
     color: '#A5B4FC',
     fontWeight: '800',
-    marginBottom: 10,
+    fontSize: 16,
   },
   limitRow: {
-    alignItems: 'flex-end',
+    flexDirection: 'row',
+    marginTop: 12,
   },
   limitBtn: {
-    backgroundColor: '#1E293B',
+    backgroundColor: '#0F172A',
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#334155',
-    borderRadius: 10,
-    paddingHorizontal: 10,
     paddingVertical: 8,
-    marginTop: 6,
+    paddingHorizontal: 10,
+    marginLeft: 8,
   },
   limitBtnText: {
     color: '#E2E8F0',
     fontWeight: '700',
     fontSize: 12,
   },
+  limitMeta: {
+    color: '#CBD5E1',
+    marginTop: 8,
+    fontSize: 12,
+  },
+  limitStatus: {
+    marginTop: 6,
+    fontWeight: '700',
+  },
+  overLimit: {
+    color: '#FCA5A5',
+  },
+  withinLimit: {
+    color: '#86EFAC',
+  },
+  limitHint: {
+    color: '#94A3B8',
+    marginTop: 8,
+    fontSize: 12,
+  },
   empty: {
     color: '#94A3B8',
     textAlign: 'center',
-    marginTop: 18,
+    marginTop: 24,
   },
 });

@@ -4,13 +4,13 @@ import {
   ScrollView,
   StyleSheet,
   View,
-  type RefreshControlProps,
+  ScrollViewProps,
 } from 'react-native';
 
 type ScreenProps = {
   children: React.ReactNode;
   scroll?: boolean;
-  refreshControl?: React.ReactElement<RefreshControlProps>;
+  refreshControl?: ScrollViewProps['refreshControl'];
 };
 
 export default function Screen({
@@ -29,10 +29,13 @@ export default function Screen({
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView
-        contentContainerStyle={styles.scroll}
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
         refreshControl={refreshControl}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.container}>{children}</View>
+        {children}
       </ScrollView>
     </SafeAreaView>
   );
@@ -43,11 +46,15 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0B1220',
   },
-  scroll: {
-    flexGrow: 1,
-  },
   container: {
     flex: 1,
+    padding: 18,
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
     padding: 18,
   },
 });

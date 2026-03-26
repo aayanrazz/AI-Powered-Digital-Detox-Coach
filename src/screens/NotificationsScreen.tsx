@@ -1,34 +1,46 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { Alert, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import Screen from '../components/Screen';
 import PrimaryButton from '../components/PrimaryButton';
 import { api } from '../api/api';
 import { NotificationItem } from '../types';
 import { formatDateTime } from '../utils/helpers';
+import { runNotificationAction } from '../utils/notificationActions';
+import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
+import {
+  dismissDeliveredBackendNotification,
+  dismissDeliveredBackendNotifications,
+} from '../services/notificationSyncService';
 
 export default function NotificationsScreen({ navigation }: any) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
+      setRefreshing(true);
       const res = await api.getNotifications();
       setNotifications(res.notifications || []);
       setUnreadCount(res.unreadCount || 0);
     } catch (error: any) {
-      Alert.alert('Notification error', error.message || 'Failed to load notifications');
+      Alert.alert(
+        'Notification error',
+        error.message || 'Failed to load notifications'
+      );
+    } finally {
+      setRefreshing(false);
     }
-  };
-
-  useEffect(() => {
-    load();
   }, []);
+
+  useRefreshOnFocus(load);
 
   const markRead = async (id?: string) => {
     if (!id) return;
 
     try {
       await api.markNotificationRead(id);
+      await dismissDeliveredBackendNotification(id);
       await load();
     } catch (error: any) {
       Alert.alert('Update failed', error.message || 'Could not mark as read');
@@ -37,51 +49,61 @@ export default function NotificationsScreen({ navigation }: any) {
 
   const markAll = async () => {
     try {
+      const unreadIds = notifications
+        .filter((item) => item._id && !item.read)
+        .map((item) => String(item._id));
+
       await api.markAllNotificationsRead();
+      await dismissDeliveredBackendNotifications(unreadIds);
       await load();
     } catch (error: any) {
       Alert.alert('Update failed', error.message || 'Could not mark all as read');
     }
   };
 
-  const openCta = async (item: NotificationItem) => {
-    if (item._id && !item.read) {
-      await markRead(item._id);
-    }
+  const handleCtaPress = async (item: NotificationItem) => {
+    try {
+      if (item._id && !item.read) {
+        await api.markNotificationRead(item._id);
+        await dismissDeliveredBackendNotification(item._id);
+      }
 
-    switch (item.ctaAction) {
-      case 'open_rewards':
-        navigation.navigate('Rewards');
-        break;
-      case 'open_detox_plan':
-        navigation.navigate('MainTabs', { screen: 'PlanTab' });
-        break;
-      case 'wind_down':
-        navigation.navigate('Settings');
-        break;
-      case 'start_break':
-        Alert.alert('Break started', 'Take a 5 minute break away from the phone.');
-        break;
-      default:
-        Alert.alert('Notification', item.message);
-        break;
+      await runNotificationAction(navigation, item);
+      await load();
+    } catch (error: any) {
+      Alert.alert('Action failed', error.message || 'Could not open this action');
     }
   };
 
   return (
-    <Screen>
+    <Screen
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={load}
+          tintColor="#ffffff"
+        />
+      }
+    >
       <Text style={styles.title}>Notifications</Text>
-      <Text style={styles.subtitle}>Smart interventions, reminders, and progress alerts</Text>
+      <Text style={styles.subtitle}>
+        Smart interventions, reminders, and progress alerts
+      </Text>
 
       <View style={styles.summaryCard}>
         <Text style={styles.summaryTitle}>Unread Alerts</Text>
         <Text style={styles.summaryCount}>{unreadCount}</Text>
         <Text style={styles.summaryText}>
-          These reminders are generated from your usage, plan progress, and rewards.
+          These reminders are generated from your usage, onboarding preferences,
+          plan progress, and rewards.
         </Text>
       </View>
 
-      <PrimaryButton title="Mark All As Read" onPress={markAll} variant="secondary" />
+      <PrimaryButton
+        title="Mark All As Read"
+        onPress={markAll}
+        variant="secondary"
+      />
 
       {notifications.length === 0 ? (
         <View style={styles.card}>
@@ -108,7 +130,10 @@ export default function NotificationsScreen({ navigation }: any) {
             </Text>
 
             {!!item.ctaLabel && (
-              <Pressable style={styles.ctaBtn} onPress={() => openCta(item)}>
+              <Pressable
+                style={styles.ctaBtn}
+                onPress={() => handleCtaPress(item)}
+              >
                 <Text style={styles.ctaText}>{item.ctaLabel}</Text>
               </Pressable>
             )}
