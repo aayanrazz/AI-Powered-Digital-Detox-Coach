@@ -6,7 +6,7 @@ export default function SplashScreen() {
     <View style={styles.container}>
       <Text style={styles.logo}>Digital Detox Coach</Text>
       <Text style={styles.tagline}>Mindful screen habits. Smarter daily focus.</Text>
-      <ActivityIndicator size="large" color="#4F46E5" style={{ marginTop: 24 }} />
+      <ActivityIndicator size="large" color="#4F46E5" style={styles.loader} />
     </View>
   );
 }
@@ -17,17 +17,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#0B1220',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24
+    padding: 24,
   },
   logo: {
-    color: '#fff',
+    color: '#FFFFFF',
     fontSize: 30,
-    fontWeight: '800'
+    fontWeight: '800',
   },
   tagline: {
     color: '#94A3B8',
     marginTop: 8,
     fontSize: 14,
-    textAlign: 'center'
-  }
+    textAlign: 'center',
+  },
+  loader: {
+    marginTop: 24,
+  },
 });

@@ -42,7 +42,10 @@ export default function AnalyticsDashboardScreen() {
 
         const res = await api.getAnalyticsSummary(activeRange);
         setAnalytics(res.analytics);
-        setRange(activeRange);
+
+        if (activeRange !== range) {
+          setRange(activeRange);
+        }
       } catch (error: any) {
         Alert.alert(
           'Analytics error',
@@ -56,7 +59,7 @@ export default function AnalyticsDashboardScreen() {
     [range]
   );
 
-  useRefreshOnFocus(() => load());
+  useRefreshOnFocus(load);
 
   const maxTrendMinutes = useMemo(() => {
     const points = analytics?.trendPoints || [];
@@ -258,14 +261,14 @@ const styles = StyleSheet.create({
   subtitle: {
     color: '#94A3B8',
     marginTop: 8,
-    marginBottom: 18,
+    marginBottom: 20,
   },
   rangeRow: {
     flexDirection: 'row',
-    marginBottom: 14,
+    marginBottom: 16,
   },
   rangeChip: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: '#111827',
@@ -275,12 +278,11 @@ const styles = StyleSheet.create({
   },
   rangeChipActive: {
     backgroundColor: '#4F46E5',
-    borderColor: '#4F46E5',
+    borderColor: '#6366F1',
   },
   rangeText: {
     color: '#CBD5E1',
     fontWeight: '700',
-    fontSize: 12,
   },
   rangeTextActive: {
     color: '#fff',
@@ -288,7 +290,6 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     marginTop: 12,
-    marginBottom: 0,
   },
   gap: {
     width: 12,
@@ -299,13 +300,12 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: '#1F2937',
-    marginBottom: 12,
     marginTop: 12,
   },
   cardTitle: {
     color: '#fff',
-    fontWeight: '800',
     fontSize: 18,
+    fontWeight: '800',
     marginBottom: 10,
   },
   cardText: {
@@ -329,9 +329,8 @@ const styles = StyleSheet.create({
   },
   trendLabel: {
     color: '#E2E8F0',
-    width: 58,
+    width: 52,
     fontWeight: '700',
-    fontSize: 12,
   },
   barTrack: {
     flex: 1,
@@ -339,44 +338,41 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: '#0F172A',
     overflow: 'hidden',
-    marginHorizontal: 10,
+    marginHorizontal: 12,
   },
   barFill: {
     height: '100%',
     borderRadius: 999,
-    backgroundColor: '#4F46E5',
+    backgroundColor: '#22C55E',
   },
   trendValue: {
     color: '#CBD5E1',
-    width: 70,
+    minWidth: 52,
     textAlign: 'right',
-    fontSize: 12,
     fontWeight: '700',
   },
   listItem: {
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1F2937',
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1F2937',
   },
   listTitle: {
-    color: '#E2E8F0',
+    color: '#fff',
     fontWeight: '700',
   },
   listMeta: {
     color: '#94A3B8',
     marginTop: 4,
-    fontSize: 12,
   },
   listValue: {
-    color: '#F8FAFC',
-    fontWeight: '700',
+    color: '#A5B4FC',
+    fontWeight: '800',
   },
   tip: {
     color: '#CBD5E1',
     marginBottom: 8,
-    lineHeight: 20,
   },
 });

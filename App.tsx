@@ -1,7 +1,8 @@
 import React, { useEffect } from 'react';
-import { AppState } from 'react-native';
+import { AppState, InteractionManager, StyleSheet } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from './src/context/AuthContext';
 import RootNavigator from './src/navigation/RootNavigator';
 import { navigationRef } from './src/navigation/navigationService';
@@ -15,6 +16,10 @@ import {
   resetDetoxNotificationSync,
   syncDetoxNotifications,
 } from './src/services/notificationSyncService';
+import {
+  clearLocalInterventionCooldowns,
+  runLocalInterventionCheck,
+} from './src/services/interventionService';
 
 function NotificationBootstrap() {
   const { loading, token, user } = useAuth();
@@ -25,7 +30,16 @@ function NotificationBootstrap() {
     }
 
     if (!token) {
-      void resetDetoxNotificationSync();
+      const clearLocalState = async () => {
+        try {
+          await resetDetoxNotificationSync();
+          await clearLocalInterventionCooldowns();
+        } catch {
+          // ignore cleanup failures while logged out
+        }
+      };
+
+      clearLocalState();
       return;
     }
 
@@ -34,29 +48,46 @@ function NotificationBootstrap() {
     }
 
     let intervalId: ReturnType<typeof setInterval> | null = null;
+    let appStateSubscription: { remove: () => void } | null = null;
+    let cancelled = false;
 
     const syncNow = async () => {
+      if (cancelled) {
+        return;
+      }
+
       try {
         await syncDetoxNotifications();
+        await runLocalInterventionCheck();
       } catch {
-        // keep app stable if sync fails
+        // ignore sync failures to keep app stable
       }
     };
 
-    void syncNow();
+    const delayedStartupSync = InteractionManager.runAfterInteractions(() => {
+      setTimeout(() => {
+        syncNow();
+      }, 1200);
+    });
 
-    const subscription = AppState.addEventListener('change', (state) => {
+    appStateSubscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        void syncNow();
+        syncNow();
       }
     });
 
     intervalId = setInterval(() => {
-      void syncNow();
+      syncNow();
     }, 60000);
 
     return () => {
-      subscription.remove();
+      cancelled = true;
+
+      delayedStartupSync.cancel();
+
+      if (appStateSubscription) {
+        appStateSubscription.remove();
+      }
 
       if (intervalId) {
         clearInterval(intervalId);
@@ -69,29 +100,55 @@ function NotificationBootstrap() {
 
 export default function App() {
   useEffect(() => {
-    void initializeNotifications();
-    void consumeInitialNotificationPress();
+    let cancelled = false;
+
+    const task = InteractionManager.runAfterInteractions(() => {
+      setTimeout(async () => {
+        if (cancelled) {
+          return;
+        }
+
+        try {
+          await initializeNotifications();
+          await consumeInitialNotificationPress();
+        } catch {
+          // ignore notification bootstrap failures
+        }
+      }, 800);
+    });
 
     const unsubscribe = registerForegroundNotificationEvents();
 
     return () => {
+      cancelled = true;
+      task.cancel();
       unsubscribe();
     };
   }, []);
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <AuthProvider>
-        <NotificationBootstrap />
-        <NavigationContainer
-          ref={navigationRef}
-          onReady={() => {
-            void flushPendingNotificationPress();
-          }}
-        >
-          <RootNavigator />
-        </NavigationContainer>
-      </AuthProvider>
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider>
+        <AuthProvider>
+          <NotificationBootstrap />
+          <NavigationContainer
+            ref={navigationRef}
+            onReady={() => {
+              flushPendingNotificationPress().catch(() => {
+                // ignore pending notification flush failures
+              });
+            }}
+          >
+            <RootNavigator />
+          </NavigationContainer>
+        </AuthProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+});

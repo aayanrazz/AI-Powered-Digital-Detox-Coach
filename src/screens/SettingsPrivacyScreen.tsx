@@ -16,6 +16,7 @@ import { SettingsData, ThemeMode } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
 import { syncDetoxNotifications } from '../services/notificationSyncService';
+import { runLocalInterventionCheck } from '../services/interventionService';
 
 const FOCUS_OPTIONS = [
   'Social Media',
@@ -148,6 +149,7 @@ export default function SettingsPrivacyScreen() {
 
       await api.updateSettings(payload);
       await syncDetoxNotifications();
+      await runLocalInterventionCheck();
 
       Alert.alert(
         'Success',

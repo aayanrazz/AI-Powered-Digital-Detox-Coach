@@ -14,6 +14,7 @@ import { api } from '../api/api';
 import { DashboardData } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
+import { syncTodayUsageForDashboard } from '../services/dashboardUsageSync.service';
 
 export default function HomeDashboardScreen({ navigation }: any) {
   const { user } = useAuth();
@@ -23,6 +24,11 @@ export default function HomeDashboardScreen({ navigation }: any) {
   const load = useCallback(async () => {
     try {
       setRefreshing(true);
+
+      // First sync live Android usage into backend
+      await syncTodayUsageForDashboard();
+
+      // Then load fresh dashboard data
       const res = await api.getDashboard();
       setDashboard(res.dashboard);
     } catch (error: any) {

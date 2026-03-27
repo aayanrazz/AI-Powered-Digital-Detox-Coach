@@ -9,3 +9,13 @@ export function navigate(name: string, params?: any) {
 
   (navigationRef as any).navigate(name, params);
 }
+
+export function goBack() {
+  if (!navigationRef.isReady()) {
+    return;
+  }
+
+  if (navigationRef.canGoBack()) {
+    navigationRef.goBack();
+  }
+}

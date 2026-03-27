@@ -1,5 +1,5 @@
 import React from 'react';
-import { Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuth } from '../context/AuthContext';
@@ -29,16 +29,18 @@ function TabLabel({
   focused: boolean;
 }) {
   return (
-    <Text
-      style={{
-        color: focused ? '#4F46E5' : '#94A3B8',
-        fontSize: 12,
-        fontWeight: '700',
-      }}
-    >
+    <Text style={focused ? styles.tabLabelFocused : styles.tabLabel}>
       {text}
     </Text>
   );
+}
+
+function buildTabOptions(text: string) {
+  return {
+    tabBarLabel: ({ focused }: { focused: boolean }) => (
+      <TabLabel text={text} focused={focused} />
+    ),
+  };
 }
 
 function MainTabs() {
@@ -46,48 +48,28 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarStyle: {
-          backgroundColor: '#0F172A',
-          borderTopColor: '#1E293B',
-          height: 68,
-        },
+        tabBarStyle: styles.tabBar,
       }}
     >
       <Tab.Screen
         name="HomeTab"
         component={HomeDashboardScreen}
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <TabLabel text="Home" focused={focused} />
-          ),
-        }}
+        options={buildTabOptions('Home')}
       />
       <Tab.Screen
         name="UsageTab"
         component={UsageMonitoringScreen}
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <TabLabel text="Usage" focused={focused} />
-          ),
-        }}
+        options={buildTabOptions('Usage')}
       />
       <Tab.Screen
         name="AnalyticsTab"
         component={AnalyticsDashboardScreen}
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <TabLabel text="Analytics" focused={focused} />
-          ),
-        }}
+        options={buildTabOptions('Analytics')}
       />
       <Tab.Screen
         name="PlanTab"
         component={DetoxPlanScreen}
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <TabLabel text="AI Plan" focused={focused} />
-          ),
-        }}
+        options={buildTabOptions('AI Plan')}
       />
     </Tab.Navigator>
   );
@@ -105,10 +87,7 @@ function AuthStackNavigator() {
 function ProfileStackNavigator() {
   return (
     <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
-      <ProfileStack.Screen
-        name="ProfileSetup"
-        component={ProfileSetupScreen}
-      />
+      <ProfileStack.Screen name="ProfileSetup" component={ProfileSetupScreen} />
     </ProfileStack.Navigator>
   );
 }
@@ -129,13 +108,7 @@ export default function RootNavigator() {
   }
 
   return (
-    <RootStack.Navigator
-      screenOptions={{
-        headerStyle: { backgroundColor: '#0B1220' },
-        headerTintColor: '#fff',
-        contentStyle: { backgroundColor: '#0B1220' },
-      }}
-    >
+    <RootStack.Navigator screenOptions={rootStackScreenOptions}>
       <RootStack.Screen
         name="MainTabs"
         component={MainTabs}
@@ -144,9 +117,31 @@ export default function RootNavigator() {
       <RootStack.Screen name="Notifications" component={NotificationsScreen} />
       <RootStack.Screen name="Rewards" component={RewardsScreen} />
       <RootStack.Screen name="Settings" component={SettingsPrivacyScreen} />
-
-      {/* keep this available so CTA from welcome/onboarding notifications always works */}
       <RootStack.Screen name="ProfileSetup" component={ProfileSetupScreen} />
     </RootStack.Navigator>
   );
 }
+
+const rootStackScreenOptions = {
+  headerStyle: { backgroundColor: '#0B1220' },
+  headerTintColor: '#FFFFFF',
+  contentStyle: { backgroundColor: '#0B1220' },
+};
+
+const styles = StyleSheet.create({
+  tabBar: {
+    backgroundColor: '#0F172A',
+    borderTopColor: '#1E293B',
+    height: 68,
+  },
+  tabLabel: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  tabLabelFocused: {
+    color: '#4F46E5',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+});

@@ -64,6 +64,19 @@ export interface UsageApp {
   category?: string;
 }
 
+export interface AppLimit {
+  _id?: string;
+  user?: string;
+  appName: string;
+  appPackage: string;
+  category?: string;
+  dailyLimitMinutes: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type AppLimitItem = AppLimit;
+
 export interface AppLimitStatusItem {
   appName: string;
   appPackage: string;
@@ -261,14 +274,6 @@ export interface RewardsSummary {
   nextBadgeHint?: NextBadgeHint | null;
 }
 
-export interface AppLimitItem {
-  _id?: string;
-  appName: string;
-  appPackage: string;
-  category?: string;
-  dailyLimitMinutes: number;
-}
-
 export interface SettingsData {
   notificationsEnabled?: boolean;
   aiInterventionsEnabled?: boolean;
@@ -290,5 +295,5 @@ export interface SettingsData {
   appleHealthConnected?: boolean;
 
   theme?: ThemeMode;
-  appLimits?: AppLimitItem[];
+  appLimits?: AppLimit[];
 }

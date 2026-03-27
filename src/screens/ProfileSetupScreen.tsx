@@ -5,6 +5,7 @@ import PrimaryButton from '../components/PrimaryButton';
 import { api } from '../api/api';
 import { useAuth } from '../context/AuthContext';
 import { syncDetoxNotifications } from '../services/notificationSyncService';
+import { runLocalInterventionCheck } from '../services/interventionService';
 
 const FOCUS_OPTIONS = [
   'Social Media',
@@ -68,11 +69,11 @@ export default function ProfileSetupScreen() {
             (res.settings.focusAreas && res.settings.focusAreas.length
               ? res.settings.focusAreas
               : ['Social Media', 'Productivity']
-            ).filter((item) => FOCUS_OPTIONS.includes(item))
+            ).filter((item: string) => FOCUS_OPTIONS.includes(item))
           );
           setCustomFocusAreas(
             (res.settings.focusAreas || [])
-              .filter((item) => !FOCUS_OPTIONS.includes(item))
+              .filter((item: string) => !FOCUS_OPTIONS.includes(item))
               .join(', ')
           );
           setBedTime(res.settings.bedTime || '23:00');
@@ -144,10 +145,11 @@ export default function ProfileSetupScreen() {
 
       await refreshUser();
       await syncDetoxNotifications();
+      await runLocalInterventionCheck();
 
       Alert.alert(
         'Success',
-        'Profile setup completed. Your plan, dashboard, and real device reminders now use your selected goals, focus areas, sleep schedule, and notification preferences.'
+        'Profile setup completed. Your plan, dashboard, real device reminders, and local intervention checks now use your selected goals, focus areas, sleep schedule, and notification preferences.'
       );
     } catch (error: any) {
       Alert.alert('Profile setup failed', error.message || 'Please try again');
