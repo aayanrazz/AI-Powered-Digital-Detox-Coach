@@ -3,6 +3,7 @@ import {
   Alert,
   Pressable,
   RefreshControl,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -17,10 +18,73 @@ import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
 
 type RangeType = 'day' | 'week' | 'month';
 
+type AnalyticsReportPreview = {
+  generatedAt: string;
+  range: RangeType;
+  analytics: AnalyticsData;
+  insights: string[];
+};
+
 const getDirectionText = (direction?: string) => {
   if (direction === 'improving') return 'Improving';
   if (direction === 'worsening') return 'Worsening';
   return 'Stable';
+};
+
+const getRangeLabel = (range: RangeType) => {
+  if (range === 'day') return 'Daily';
+  if (range === 'month') return 'Monthly';
+  return 'Weekly';
+};
+
+const buildReportText = (report: AnalyticsReportPreview) => {
+  const lines: string[] = [];
+
+  lines.push('AI-Powered Digital Detox Coach');
+  lines.push(`${getRangeLabel(report.range)} Analytics Report`);
+  lines.push(`Generated: ${new Date(report.generatedAt).toLocaleString()}`);
+  lines.push('');
+  lines.push(`Focus Score: ${report.analytics.focusScore ?? 0}`);
+  lines.push(
+    `Total Usage: ${formatMinutes(report.analytics.totalUsageMinutes ?? 0)}`
+  );
+  lines.push(
+    `Average Per Day: ${formatMinutes(report.analytics.averageDailyMinutes ?? 0)}`
+  );
+  lines.push(`Pickups: ${report.analytics.pickupCount ?? 0}`);
+  lines.push(`Unlocks: ${report.analytics.unlockCount ?? 0}`);
+  lines.push(
+    `Late Night Usage: ${formatMinutes(report.analytics.lateNightMinutes ?? 0)}`
+  );
+  lines.push(`Peak Hour: ${report.analytics.peakHourLabel || '00:00'}`);
+  lines.push(`Risk Level: ${report.analytics.riskLevel || 'low'}`);
+  lines.push('');
+  lines.push('Trend Overview:');
+  lines.push(
+    report.analytics.comparison?.summary ||
+      report.analytics.weeklyTrend ||
+      'Your recent usage trend is being analyzed.'
+  );
+
+  if ((report.analytics.categoryBreakdown || []).length) {
+    lines.push('');
+    lines.push('Category Breakdown:');
+    report.analytics.categoryBreakdown?.forEach((item) => {
+      lines.push(
+        `- ${item.category}: ${formatMinutes(item.minutes)} (${item.sharePct ?? 0}%)`
+      );
+    });
+  }
+
+  if ((report.insights || []).length) {
+    lines.push('');
+    lines.push('AI Recommendations:');
+    report.insights.forEach((tip, index) => {
+      lines.push(`${index + 1}. ${tip}`);
+    });
+  }
+
+  return lines.join('\n');
 };
 
 export default function AnalyticsDashboardScreen() {
@@ -28,6 +92,9 @@ export default function AnalyticsDashboardScreen() {
   const [range, setRange] = useState<RangeType>('week');
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [reportPreview, setReportPreview] =
+    useState<AnalyticsReportPreview | null>(null);
 
   const load = useCallback(
     async (nextRange?: RangeType) => {
@@ -58,6 +125,50 @@ export default function AnalyticsDashboardScreen() {
     },
     [range]
   );
+
+  const handleExportReport = useCallback(async () => {
+    try {
+      setExporting(true);
+
+      const res = await api.exportAnalyticsReport(range);
+      const preview: AnalyticsReportPreview = {
+        generatedAt: res.generatedAt,
+        range: res.report.range,
+        analytics: res.report.analytics,
+        insights: res.report.insights,
+      };
+
+      setReportPreview(preview);
+
+      await Share.share({
+        title: `${getRangeLabel(preview.range)} Analytics Report`,
+        message: buildReportText(preview),
+      });
+    } catch (error: any) {
+      Alert.alert(
+        'Export failed',
+        error.message || 'Failed to export analytics report.'
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [range]);
+
+  const handleShareLatestReport = useCallback(async () => {
+    if (!reportPreview) {
+      Alert.alert('No report yet', 'Please export a report first.');
+      return;
+    }
+
+    try {
+      await Share.share({
+        title: `${getRangeLabel(reportPreview.range)} Analytics Report`,
+        message: buildReportText(reportPreview),
+      });
+    } catch (error: any) {
+      Alert.alert('Share failed', error.message || 'Failed to share report.');
+    }
+  }, [reportPreview]);
 
   useRefreshOnFocus(load);
 
@@ -98,12 +209,24 @@ export default function AnalyticsDashboardScreen() {
         ))}
       </View>
 
-      <PrimaryButton
-        title="Refresh Analytics"
-        onPress={() => load()}
-        loading={loading}
-        variant="secondary"
-      />
+      <View style={styles.buttonRow}>
+        <View style={styles.buttonHalfLeft}>
+          <PrimaryButton
+            title="Refresh Analytics"
+            onPress={() => load()}
+            loading={loading}
+            variant="secondary"
+          />
+        </View>
+
+        <View style={styles.buttonHalfRight}>
+          <PrimaryButton
+            title="Export Report"
+            onPress={handleExportReport}
+            loading={exporting}
+          />
+        </View>
+      </View>
 
       <View style={styles.row}>
         <MetricCard label="Focus Score" value={analytics?.focusScore ?? 0} />
@@ -248,6 +371,62 @@ export default function AnalyticsDashboardScreen() {
           <Text style={styles.cardText}>No recommendations yet.</Text>
         )}
       </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Analytics Report Export</Text>
+        <Text style={styles.cardText}>
+          Tap Export Report to generate a simple shareable report from your current
+          analytics range.
+        </Text>
+        <Text style={styles.meta}>Selected range: {getRangeLabel(range)}</Text>
+
+        {reportPreview ? (
+          <>
+            <View style={styles.reportDivider} />
+            <Text style={styles.reportHeading}>Latest Report Preview</Text>
+            <Text style={styles.meta}>
+              Generated: {new Date(reportPreview.generatedAt).toLocaleString()}
+            </Text>
+            <Text style={styles.meta}>
+              Total usage: {formatMinutes(reportPreview.analytics.totalUsageMinutes ?? 0)}
+            </Text>
+            <Text style={styles.meta}>
+              Average per day: {formatMinutes(reportPreview.analytics.averageDailyMinutes ?? 0)}
+            </Text>
+            <Text style={styles.meta}>
+              Focus score: {reportPreview.analytics.focusScore ?? 0}
+            </Text>
+            <Text style={styles.meta}>
+              Risk level: {reportPreview.analytics.riskLevel || 'low'}
+            </Text>
+            <Text style={styles.reportSummary}>
+              {reportPreview.analytics.comparison?.summary ||
+                reportPreview.analytics.weeklyTrend ||
+                'Your recent usage trend is being analyzed.'}
+            </Text>
+
+            {(reportPreview.insights || []).length ? (
+              <View style={styles.reportTipsWrap}>
+                {reportPreview.insights.map((tip, idx) => (
+                  <Text key={`${tip}-${idx}`} style={styles.tip}>
+                    • {tip}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+
+            <PrimaryButton
+              title="Share Latest Report Again"
+              onPress={handleShareLatestReport}
+              variant="secondary"
+            />
+          </>
+        ) : (
+          <Text style={styles.emptyReportText}>
+            No exported report yet. Generate one to preview and share it.
+          </Text>
+        )}
+      </View>
     </Screen>
   );
 }
@@ -265,7 +444,19 @@ const styles = StyleSheet.create({
   },
   rangeRow: {
     flexDirection: 'row',
-    marginBottom: 16,
+    marginBottom: 6,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    marginBottom: 2,
+  },
+  buttonHalfLeft: {
+    flex: 1,
+    marginRight: 6,
+  },
+  buttonHalfRight: {
+    flex: 1,
+    marginLeft: 6,
   },
   rangeChip: {
     paddingHorizontal: 16,
@@ -374,5 +565,28 @@ const styles = StyleSheet.create({
   tip: {
     color: '#CBD5E1',
     marginBottom: 8,
+  },
+  reportDivider: {
+    height: 1,
+    backgroundColor: '#1F2937',
+    marginVertical: 14,
+  },
+  reportHeading: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 2,
+  },
+  reportSummary: {
+    color: '#CBD5E1',
+    lineHeight: 20,
+    marginTop: 10,
+  },
+  reportTipsWrap: {
+    marginTop: 12,
+  },
+  emptyReportText: {
+    color: '#64748B',
+    marginTop: 12,
   },
 });

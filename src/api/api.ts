@@ -20,6 +20,7 @@ import {
 } from '../types';
 
 type RiskLevel = 'low' | 'medium' | 'high';
+type AnalyticsRange = 'day' | 'week' | 'month';
 
 const deriveRiskLevel = (score?: number | null): RiskLevel => {
   if (score === undefined || score === null) return 'low';
@@ -282,6 +283,57 @@ const mapUsageAppsToSessions = (apps: UsageApp[]) => {
   });
 };
 
+const mapAnalyticsFromBackend = (
+  analytics: any,
+  range: AnalyticsRange,
+  insights: string[] = []
+): AnalyticsData => ({
+  focusScore: Number(analytics?.score ?? 0),
+  totalUsageMinutes: Number(analytics?.totalScreenMinutes ?? 0),
+  averageDailyMinutes: Number(analytics?.averageDailyMinutes ?? 0),
+  pickupCount: Number(analytics?.pickups ?? 0),
+  unlockCount: Number(analytics?.unlocks ?? 0),
+  lateNightMinutes: Number(analytics?.lateNightMinutes ?? 0),
+  peakHour: Number(analytics?.peakHour ?? 0),
+  peakHourLabel:
+    analytics?.peakHourLabel ??
+    `${String(Number(analytics?.peakHour ?? 0)).padStart(2, '0')}:00`,
+  trendLabel:
+    analytics?.trendLabel ?? (range === 'day' ? 'Hourly Usage' : 'Daily Usage'),
+  trendPoints: Array.isArray(analytics?.trendPoints)
+    ? analytics.trendPoints.map((item: any) => ({
+        label: item.label,
+        shortLabel: item.shortLabel,
+        minutes: Number(item.minutes ?? 0),
+      }))
+    : [],
+  weeklyTrend:
+    analytics?.comparison?.summary ||
+    insights[0] ||
+    'Your recent usage trend is being analyzed.',
+  recommendations: insights,
+  riskLevel: analytics?.riskLevel ?? deriveRiskLevel(analytics?.score),
+  categoryBreakdown: Array.isArray(analytics?.categoryBreakdown)
+    ? analytics.categoryBreakdown.map((item: any) => ({
+        category: item.category,
+        minutes: Number(item.minutes ?? 0),
+        sharePct: Number(item.sharePct ?? 0),
+      }))
+    : [],
+  comparison: analytics?.comparison
+    ? {
+        usageChangePct: Number(analytics.comparison.usageChangePct ?? 0),
+        pickupChangePct: Number(analytics.comparison.pickupChangePct ?? 0),
+        unlockChangePct: Number(analytics.comparison.unlockChangePct ?? 0),
+        direction: analytics.comparison.direction ?? 'steady',
+        summary: analytics.comparison.summary ?? '',
+      }
+    : undefined,
+  totalActiveDays: Number(analytics?.totalActiveDays ?? 0),
+  bestDayLabel: analytics?.bestDayLabel ?? '',
+  worstDayLabel: analytics?.worstDayLabel ?? '',
+});
+
 export const api = {
   health: () => http('/health', { auth: false }),
 
@@ -399,6 +451,11 @@ export const api = {
       body: payload,
     }),
 
+  deleteAppLimit: (appPackage: string) =>
+    http(`/settings/app-limits/${encodeURIComponent(appPackage)}`, {
+      method: 'DELETE',
+    }),
+
   ingestUsage: async (payload: { apps: UsageApp[] }) => {
     const res = await http<{
       success: boolean;
@@ -462,61 +519,55 @@ export const api = {
   },
 
   async getAnalyticsSummary(
-    range: 'day' | 'week' | 'month' = 'week'
+    range: AnalyticsRange = 'week'
   ): Promise<{ analytics: AnalyticsData }> {
     const res = await http<{ analytics: any; insights?: string[] }>(
       `/analytics/summary?range=${range}`
     );
 
-    const analytics = res.analytics || {};
     const insights = Array.isArray(res.insights) ? res.insights : [];
 
     return {
-      analytics: {
-        focusScore: Number(analytics.score ?? 0),
-        totalUsageMinutes: Number(analytics.totalScreenMinutes ?? 0),
-        averageDailyMinutes: Number(analytics.averageDailyMinutes ?? 0),
-        pickupCount: Number(analytics.pickups ?? 0),
-        unlockCount: Number(analytics.unlocks ?? 0),
-        lateNightMinutes: Number(analytics.lateNightMinutes ?? 0),
-        peakHour: Number(analytics.peakHour ?? 0),
-        peakHourLabel:
-          analytics.peakHourLabel ??
-          `${String(Number(analytics.peakHour ?? 0)).padStart(2, '0')}:00`,
-        trendLabel:
-          analytics.trendLabel ?? (range === 'day' ? 'Hourly Usage' : 'Daily Usage'),
-        trendPoints: Array.isArray(analytics.trendPoints)
-          ? analytics.trendPoints.map((item: any) => ({
-              label: item.label,
-              shortLabel: item.shortLabel,
-              minutes: Number(item.minutes ?? 0),
-            }))
-          : [],
-        weeklyTrend:
-          analytics?.comparison?.summary ||
-          insights[0] ||
-          'Your recent usage trend is being analyzed.',
-        recommendations: insights,
-        riskLevel: analytics.riskLevel ?? deriveRiskLevel(analytics.score),
-        categoryBreakdown: Array.isArray(analytics.categoryBreakdown)
-          ? analytics.categoryBreakdown.map((item: any) => ({
-              category: item.category,
-              minutes: Number(item.minutes ?? 0),
-              sharePct: Number(item.sharePct ?? 0),
-            }))
-          : [],
-        comparison: analytics.comparison
-          ? {
-              usageChangePct: Number(analytics.comparison.usageChangePct ?? 0),
-              pickupChangePct: Number(analytics.comparison.pickupChangePct ?? 0),
-              unlockChangePct: Number(analytics.comparison.unlockChangePct ?? 0),
-              direction: analytics.comparison.direction ?? 'steady',
-              summary: analytics.comparison.summary ?? '',
-            }
-          : undefined,
-        totalActiveDays: Number(analytics.totalActiveDays ?? 0),
-        bestDayLabel: analytics.bestDayLabel ?? '',
-        worstDayLabel: analytics.worstDayLabel ?? '',
+      analytics: mapAnalyticsFromBackend(res.analytics || {}, range, insights),
+    };
+  },
+
+  async exportAnalyticsReport(
+    range: AnalyticsRange = 'month'
+  ): Promise<{
+    generatedAt: string;
+    report: {
+      range: AnalyticsRange;
+      analytics: AnalyticsData;
+      insights: string[];
+    };
+  }> {
+    const res = await http<{
+      generatedAt?: string;
+      report?: {
+        range?: AnalyticsRange;
+        analytics?: any;
+        insights?: string[];
+      };
+    }>(`/analytics/export?range=${range}`);
+
+    const reportRange = (res.report?.range || range) as AnalyticsRange;
+    const insights = Array.isArray(res.report?.insights)
+      ? res.report?.insights
+      : [];
+
+    return {
+      generatedAt: res.generatedAt
+        ? new Date(res.generatedAt).toISOString()
+        : new Date().toISOString(),
+      report: {
+        range: reportRange,
+        analytics: mapAnalyticsFromBackend(
+          res.report?.analytics || {},
+          reportRange,
+          insights
+        ),
+        insights,
       },
     };
   },
