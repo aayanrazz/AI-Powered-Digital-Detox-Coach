@@ -21,6 +21,73 @@ import {
 
 type RiskLevel = 'low' | 'medium' | 'high';
 type AnalyticsRange = 'day' | 'week' | 'month';
+type DatasetFormat = 'json' | 'csv';
+
+type DatasetSessionRow = {
+  recordId: string;
+  dayToken: string;
+  relativeDayIndex: number;
+  weekday: string;
+  hourBucket: number;
+  appToken: string;
+  category: string;
+  durationMinutes: number;
+  pickups: number;
+  unlocks: number;
+  isLateNight: number;
+  platform: string;
+  source: string;
+  riskLevel: string;
+  behaviorLabel: string;
+  isAddictiveBehaviorEpisode: number;
+};
+
+type DatasetEpisodeLabel = {
+  episodeId: string;
+  dayToken: string;
+  relativeDayIndex: number;
+  weekday: string;
+  totalScreenMinutes: number;
+  socialMinutes: number;
+  productivityMinutes: number;
+  lateNightMinutes: number;
+  pickups: number;
+  unlocks: number;
+  dailyLimitMinutes: number;
+  overLimitMinutes: number;
+  detoxScore: number;
+  riskLevel: string;
+  behaviorLabel: string;
+  isAddictiveBehaviorEpisode: number;
+  reasons: string;
+};
+
+type PrivacyPolicySection = {
+  title: string;
+  items: string[];
+};
+
+type PrivacySettingsPayload = {
+  dataCollection: boolean;
+  anonymizeData: boolean;
+  allowAnalyticsForTraining: boolean;
+  retentionDays: number;
+  consentGiven: boolean;
+  consentVersion: string;
+  consentedAt: string | null;
+  policyLastViewedAt: string | null;
+  deletionRequestedAt: string | null;
+};
+
+type PrivacyPolicyPayload = {
+  version: string;
+  updatedAt: string;
+  summary: string[];
+  sections: PrivacyPolicySection[];
+  retentionOptions: number[];
+  securityPractices: string[];
+  currentPrivacySettings: PrivacySettingsPayload;
+};
 
 const deriveRiskLevel = (score?: number | null): RiskLevel => {
   if (score === undefined || score === null) return 'low';
@@ -114,7 +181,9 @@ const mapBadgeFromBackend = (item: any): BadgeDisplayItem => ({
 });
 
 const mapNextBadgeHintFromBackend = (item: any): NextBadgeHint | null => {
-  if (!item) return null;
+  if (!item) {
+    return null;
+  }
 
   return {
     key: item?.key ?? '',
@@ -419,6 +488,52 @@ export const api = {
     };
   },
 
+  async getPrivacyPolicy(): Promise<{ policy: PrivacyPolicyPayload }> {
+    const res = await http<{ policy: PrivacyPolicyPayload }>('/privacy/policy');
+    return res;
+  },
+
+  async savePrivacyConsent(payload: {
+    consentGiven: boolean;
+    dataCollection: boolean;
+    anonymizeData: boolean;
+    allowAnalyticsForTraining: boolean;
+    retentionDays: number;
+  }): Promise<{
+    message: string;
+    privacySettings: PrivacySettingsPayload;
+  }> {
+    return http<{
+      message: string;
+      privacySettings: PrivacySettingsPayload;
+    }>('/privacy/consent', {
+      method: 'PUT',
+      body: payload,
+    });
+  },
+
+  async deleteMyData(): Promise<{
+    message: string;
+    deleted: {
+      usageSessions: boolean;
+      appLimits: boolean;
+      notifications: boolean;
+    };
+    privacySettings: PrivacySettingsPayload;
+  }> {
+    return http<{
+      message: string;
+      deleted: {
+        usageSessions: boolean;
+        appLimits: boolean;
+        notifications: boolean;
+      };
+      privacySettings: PrivacySettingsPayload;
+    }>('/privacy/delete-my-data', {
+      method: 'DELETE',
+    });
+  },
+
   completeProfileSetup: (payload: {
     name: string;
     age: number;
@@ -568,6 +683,79 @@ export const api = {
           insights
         ),
         insights,
+      },
+    };
+  },
+
+  async exportAnonymizedDataset(
+    range: AnalyticsRange = 'month',
+    format: DatasetFormat = 'json'
+  ): Promise<{
+    generatedAt: string;
+    dataset: {
+      range: AnalyticsRange;
+      format: DatasetFormat;
+      summary: {
+        sessionCount: number;
+        episodeCount: number;
+        dailyLimitMinutes: number;
+        includesAppNames: boolean;
+        includesPersonalIdentity: boolean;
+        exportNotes: string[];
+      };
+      sessionRows: DatasetSessionRow[];
+      episodeLabels: DatasetEpisodeLabel[];
+      sessionRowsCsv: string;
+      episodeLabelsCsv: string;
+    };
+  }> {
+    const res = await http<{
+      generatedAt?: string;
+      dataset?: {
+        range?: AnalyticsRange;
+        format?: DatasetFormat;
+        summary?: {
+          sessionCount?: number;
+          episodeCount?: number;
+          dailyLimitMinutes?: number;
+          includesAppNames?: boolean;
+          includesPersonalIdentity?: boolean;
+          exportNotes?: string[];
+        };
+        sessionRows?: DatasetSessionRow[];
+        episodeLabels?: DatasetEpisodeLabel[];
+        sessionRowsCsv?: string;
+        episodeLabelsCsv?: string;
+      };
+    }>(`/analytics/export-dataset?range=${range}&format=${format}`);
+
+    return {
+      generatedAt: res.generatedAt
+        ? new Date(res.generatedAt).toISOString()
+        : new Date().toISOString(),
+      dataset: {
+        range: (res.dataset?.range || range) as AnalyticsRange,
+        format: (res.dataset?.format || format) as DatasetFormat,
+        summary: {
+          sessionCount: Number(res.dataset?.summary?.sessionCount ?? 0),
+          episodeCount: Number(res.dataset?.summary?.episodeCount ?? 0),
+          dailyLimitMinutes: Number(res.dataset?.summary?.dailyLimitMinutes ?? 0),
+          includesAppNames: Boolean(res.dataset?.summary?.includesAppNames),
+          includesPersonalIdentity: Boolean(
+            res.dataset?.summary?.includesPersonalIdentity
+          ),
+          exportNotes: Array.isArray(res.dataset?.summary?.exportNotes)
+            ? res.dataset?.summary?.exportNotes
+            : [],
+        },
+        sessionRows: Array.isArray(res.dataset?.sessionRows)
+          ? res.dataset?.sessionRows
+          : [],
+        episodeLabels: Array.isArray(res.dataset?.episodeLabels)
+          ? res.dataset?.episodeLabels
+          : [],
+        sessionRowsCsv: res.dataset?.sessionRowsCsv ?? '',
+        episodeLabelsCsv: res.dataset?.episodeLabelsCsv ?? '',
       },
     };
   },

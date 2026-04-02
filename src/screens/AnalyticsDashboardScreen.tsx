@@ -25,6 +25,24 @@ type AnalyticsReportPreview = {
   insights: string[];
 };
 
+type DatasetPreview = {
+  generatedAt: string;
+  range: RangeType;
+  format: 'json' | 'csv';
+  summary: {
+    sessionCount: number;
+    episodeCount: number;
+    dailyLimitMinutes: number;
+    includesAppNames: boolean;
+    includesPersonalIdentity: boolean;
+    exportNotes: string[];
+  };
+  sessionRowsCsv: string;
+  episodeLabelsCsv: string;
+  sessionRows: any[];
+  episodeLabels: any[];
+};
+
 const getDirectionText = (direction?: string) => {
   if (direction === 'improving') return 'Improving';
   if (direction === 'worsening') return 'Worsening';
@@ -45,17 +63,11 @@ const buildReportText = (report: AnalyticsReportPreview) => {
   lines.push(`Generated: ${new Date(report.generatedAt).toLocaleString()}`);
   lines.push('');
   lines.push(`Focus Score: ${report.analytics.focusScore ?? 0}`);
-  lines.push(
-    `Total Usage: ${formatMinutes(report.analytics.totalUsageMinutes ?? 0)}`
-  );
-  lines.push(
-    `Average Per Day: ${formatMinutes(report.analytics.averageDailyMinutes ?? 0)}`
-  );
+  lines.push(`Total Usage: ${formatMinutes(report.analytics.totalUsageMinutes ?? 0)}`);
+  lines.push(`Average Per Day: ${formatMinutes(report.analytics.averageDailyMinutes ?? 0)}`);
   lines.push(`Pickups: ${report.analytics.pickupCount ?? 0}`);
   lines.push(`Unlocks: ${report.analytics.unlockCount ?? 0}`);
-  lines.push(
-    `Late Night Usage: ${formatMinutes(report.analytics.lateNightMinutes ?? 0)}`
-  );
+  lines.push(`Late Night Usage: ${formatMinutes(report.analytics.lateNightMinutes ?? 0)}`);
   lines.push(`Peak Hour: ${report.analytics.peakHourLabel || '00:00'}`);
   lines.push(`Risk Level: ${report.analytics.riskLevel || 'low'}`);
   lines.push('');
@@ -87,14 +99,41 @@ const buildReportText = (report: AnalyticsReportPreview) => {
   return lines.join('\n');
 };
 
+const buildDatasetJsonText = (preview: DatasetPreview) =>
+  JSON.stringify(
+    {
+      generatedAt: preview.generatedAt,
+      dataset: {
+        range: preview.range,
+        format: preview.format,
+        summary: preview.summary,
+        sessionRows: preview.sessionRows,
+        episodeLabels: preview.episodeLabels,
+      },
+    },
+    null,
+    2
+  );
+
+const buildDatasetCsvText = (preview: DatasetPreview) => {
+  const parts: string[] = [];
+  parts.push('ANONYMIZED_USAGE_SESSIONS');
+  parts.push(preview.sessionRowsCsv || '');
+  parts.push('');
+  parts.push('ADDICTIVE_BEHAVIOR_EPISODES');
+  parts.push(preview.episodeLabelsCsv || '');
+  return parts.join('\n');
+};
+
 export default function AnalyticsDashboardScreen() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [range, setRange] = useState<RangeType>('week');
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [reportPreview, setReportPreview] =
-    useState<AnalyticsReportPreview | null>(null);
+  const [exportingReport, setExportingReport] = useState(false);
+  const [exportingDataset, setExportingDataset] = useState<'json' | 'csv' | ''>('');
+  const [reportPreview, setReportPreview] = useState<AnalyticsReportPreview | null>(null);
+  const [datasetPreview, setDatasetPreview] = useState<DatasetPreview | null>(null);
 
   const load = useCallback(
     async (nextRange?: RangeType) => {
@@ -114,10 +153,7 @@ export default function AnalyticsDashboardScreen() {
           setRange(activeRange);
         }
       } catch (error: any) {
-        Alert.alert(
-          'Analytics error',
-          error.message || 'Failed to load analytics'
-        );
+        Alert.alert('Analytics error', error.message || 'Failed to load analytics');
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -128,7 +164,7 @@ export default function AnalyticsDashboardScreen() {
 
   const handleExportReport = useCallback(async () => {
     try {
-      setExporting(true);
+      setExportingReport(true);
 
       const res = await api.exportAnalyticsReport(range);
       const preview: AnalyticsReportPreview = {
@@ -145,12 +181,9 @@ export default function AnalyticsDashboardScreen() {
         message: buildReportText(preview),
       });
     } catch (error: any) {
-      Alert.alert(
-        'Export failed',
-        error.message || 'Failed to export analytics report.'
-      );
+      Alert.alert('Export failed', error.message || 'Failed to export analytics report.');
     } finally {
-      setExporting(false);
+      setExportingReport(false);
     }
   }, [range]);
 
@@ -169,6 +202,67 @@ export default function AnalyticsDashboardScreen() {
       Alert.alert('Share failed', error.message || 'Failed to share report.');
     }
   }, [reportPreview]);
+
+  const handleExportDataset = useCallback(
+    async (format: 'json' | 'csv') => {
+      try {
+        setExportingDataset(format);
+
+        const res = await api.exportAnonymizedDataset(range, format);
+        const preview: DatasetPreview = {
+          generatedAt: res.generatedAt,
+          range: res.dataset.range,
+          format: res.dataset.format,
+          summary: res.dataset.summary,
+          sessionRowsCsv: res.dataset.sessionRowsCsv,
+          episodeLabelsCsv: res.dataset.episodeLabelsCsv,
+          sessionRows: res.dataset.sessionRows,
+          episodeLabels: res.dataset.episodeLabels,
+        };
+
+        setDatasetPreview(preview);
+
+        const shareText =
+          format === 'json'
+            ? buildDatasetJsonText(preview)
+            : buildDatasetCsvText(preview);
+
+        await Share.share({
+          title: `${getRangeLabel(preview.range)} Anonymized Dataset`,
+          message: shareText,
+        });
+      } catch (error: any) {
+        Alert.alert(
+          'Dataset export failed',
+          error.message || 'Failed to export anonymized dataset.'
+        );
+      } finally {
+        setExportingDataset('');
+      }
+    },
+    [range]
+  );
+
+  const handleShareLatestDataset = useCallback(async () => {
+    if (!datasetPreview) {
+      Alert.alert('No dataset yet', 'Please export a dataset first.');
+      return;
+    }
+
+    try {
+      const shareText =
+        datasetPreview.format === 'json'
+          ? buildDatasetJsonText(datasetPreview)
+          : buildDatasetCsvText(datasetPreview);
+
+      await Share.share({
+        title: `${getRangeLabel(datasetPreview.range)} Anonymized Dataset`,
+        message: shareText,
+      });
+    } catch (error: any) {
+      Alert.alert('Share failed', error.message || 'Failed to share dataset.');
+    }
+  }, [datasetPreview]);
 
   useRefreshOnFocus(load);
 
@@ -200,9 +294,7 @@ export default function AnalyticsDashboardScreen() {
             style={[styles.rangeChip, range === item && styles.rangeChipActive]}
             onPress={() => load(item)}
           >
-            <Text
-              style={[styles.rangeText, range === item && styles.rangeTextActive]}
-            >
+            <Text style={[styles.rangeText, range === item && styles.rangeTextActive]}>
               {item.toUpperCase()}
             </Text>
           </Pressable>
@@ -223,7 +315,7 @@ export default function AnalyticsDashboardScreen() {
           <PrimaryButton
             title="Export Report"
             onPress={handleExportReport}
-            loading={exporting}
+            loading={exportingReport}
           />
         </View>
       </View>
@@ -252,10 +344,7 @@ export default function AnalyticsDashboardScreen() {
           value={formatMinutes(analytics?.lateNightMinutes)}
         />
         <View style={styles.gap} />
-        <MetricCard
-          label="Peak Hour"
-          value={analytics?.peakHourLabel || '00:00'}
-        />
+        <MetricCard label="Peak Hour" value={analytics?.peakHourLabel || '00:00'} />
       </View>
 
       <View style={styles.card}>
@@ -294,17 +383,13 @@ export default function AnalyticsDashboardScreen() {
 
             return (
               <View key={`${item.label}-${index}`} style={styles.trendRow}>
-                <Text style={styles.trendLabel}>
-                  {item.shortLabel || item.label}
-                </Text>
+                <Text style={styles.trendLabel}>{item.shortLabel || item.label}</Text>
 
                 <View style={styles.barTrack}>
                   <View style={[styles.barFill, { width: `${widthPct}%` }]} />
                 </View>
 
-                <Text style={styles.trendValue}>
-                  {formatMinutes(item.minutes)}
-                </Text>
+                <Text style={styles.trendValue}>{formatMinutes(item.minutes)}</Text>
               </View>
             );
           })
@@ -319,12 +404,8 @@ export default function AnalyticsDashboardScreen() {
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Usage Highlights</Text>
-        <Text style={styles.meta}>
-          Risk level: {analytics?.riskLevel || 'low'}
-        </Text>
-        <Text style={styles.meta}>
-          Active periods: {analytics?.totalActiveDays ?? 0}
-        </Text>
+        <Text style={styles.meta}>Risk level: {analytics?.riskLevel || 'low'}</Text>
+        <Text style={styles.meta}>Active periods: {analytics?.totalActiveDays ?? 0}</Text>
         <Text style={styles.meta}>
           Best day / period: {analytics?.bestDayLabel || 'Not enough data'}
         </Text>
@@ -341,9 +422,7 @@ export default function AnalyticsDashboardScreen() {
             <View key={`${item.category}-${idx}`} style={styles.listItem}>
               <View>
                 <Text style={styles.listTitle}>{item.category}</Text>
-                <Text style={styles.listMeta}>
-                  {item.sharePct ?? 0}% of usage
-                </Text>
+                <Text style={styles.listMeta}>{item.sharePct ?? 0}% of usage</Text>
               </View>
 
               <Text style={styles.listValue}>{formatMinutes(item.minutes)}</Text>
@@ -375,8 +454,7 @@ export default function AnalyticsDashboardScreen() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Analytics Report Export</Text>
         <Text style={styles.cardText}>
-          Tap Export Report to generate a simple shareable report from your current
-          analytics range.
+          Tap Export Report to generate a simple shareable report from your current analytics range.
         </Text>
         <Text style={styles.meta}>Selected range: {getRangeLabel(range)}</Text>
 
@@ -393,12 +471,8 @@ export default function AnalyticsDashboardScreen() {
             <Text style={styles.meta}>
               Average per day: {formatMinutes(reportPreview.analytics.averageDailyMinutes ?? 0)}
             </Text>
-            <Text style={styles.meta}>
-              Focus score: {reportPreview.analytics.focusScore ?? 0}
-            </Text>
-            <Text style={styles.meta}>
-              Risk level: {reportPreview.analytics.riskLevel || 'low'}
-            </Text>
+            <Text style={styles.meta}>Focus score: {reportPreview.analytics.focusScore ?? 0}</Text>
+            <Text style={styles.meta}>Risk level: {reportPreview.analytics.riskLevel || 'low'}</Text>
             <Text style={styles.reportSummary}>
               {reportPreview.analytics.comparison?.summary ||
                 reportPreview.analytics.weeklyTrend ||
@@ -424,6 +498,74 @@ export default function AnalyticsDashboardScreen() {
         ) : (
           <Text style={styles.emptyReportText}>
             No exported report yet. Generate one to preview and share it.
+          </Text>
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Anonymized Dataset Export</Text>
+        <Text style={styles.cardText}>
+          This creates a training dataset without user name, email, app name, or package name. It exports anonymized session rows and labeled addictive-behavior episodes.
+        </Text>
+        <Text style={styles.meta}>Selected range: {getRangeLabel(range)}</Text>
+
+        <View style={styles.buttonRow}>
+          <View style={styles.buttonHalfLeft}>
+            <PrimaryButton
+              title="Export JSON Dataset"
+              onPress={() => handleExportDataset('json')}
+              loading={exportingDataset === 'json'}
+              variant="secondary"
+            />
+          </View>
+
+          <View style={styles.buttonHalfRight}>
+            <PrimaryButton
+              title="Export CSV Dataset"
+              onPress={() => handleExportDataset('csv')}
+              loading={exportingDataset === 'csv'}
+            />
+          </View>
+        </View>
+
+        {datasetPreview ? (
+          <>
+            <View style={styles.reportDivider} />
+            <Text style={styles.reportHeading}>Latest Dataset Preview</Text>
+            <Text style={styles.meta}>
+              Generated: {new Date(datasetPreview.generatedAt).toLocaleString()}
+            </Text>
+            <Text style={styles.meta}>Session rows: {datasetPreview.summary.sessionCount}</Text>
+            <Text style={styles.meta}>Episode labels: {datasetPreview.summary.episodeCount}</Text>
+            <Text style={styles.meta}>
+              Daily limit used in labeling: {datasetPreview.summary.dailyLimitMinutes} minutes
+            </Text>
+            <Text style={styles.meta}>
+              Personal identity included: {datasetPreview.summary.includesPersonalIdentity ? 'Yes' : 'No'}
+            </Text>
+            <Text style={styles.meta}>
+              App names included: {datasetPreview.summary.includesAppNames ? 'Yes' : 'No'}
+            </Text>
+
+            {(datasetPreview.summary.exportNotes || []).length ? (
+              <View style={styles.reportTipsWrap}>
+                {datasetPreview.summary.exportNotes.map((tip, idx) => (
+                  <Text key={`${tip}-${idx}`} style={styles.tip}>
+                    • {tip}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+
+            <PrimaryButton
+              title="Share Latest Dataset Again"
+              onPress={handleShareLatestDataset}
+              variant="secondary"
+            />
+          </>
+        ) : (
+          <Text style={styles.emptyReportText}>
+            No anonymized dataset exported yet. Generate one to preview and share it.
           </Text>
         )}
       </View>

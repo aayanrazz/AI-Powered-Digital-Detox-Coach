@@ -27,6 +27,33 @@ const FOCUS_OPTIONS = [
   'Sleep',
 ];
 
+type RetentionOption = 7 | 30 | 90 | 180 | 365;
+
+type PolicySection = {
+  title: string;
+  items: string[];
+};
+
+type PrivacyPolicyData = {
+  version: string;
+  updatedAt: string;
+  summary: string[];
+  sections: PolicySection[];
+  retentionOptions: number[];
+  securityPractices: string[];
+  currentPrivacySettings: {
+    dataCollection: boolean;
+    anonymizeData: boolean;
+    allowAnalyticsForTraining: boolean;
+    retentionDays: number;
+    consentGiven: boolean;
+    consentVersion: string;
+    consentedAt: string | null;
+    policyLastViewedAt: string | null;
+    deletionRequestedAt: string | null;
+  };
+};
+
 function parseFocusAreas(input: string) {
   return input
     .split(',')
@@ -46,6 +73,11 @@ function normalizeTime(value: string | undefined, fallback: string) {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 }
 
+function formatDateTime(value?: string | null) {
+  if (!value) return 'Not set';
+  return new Date(value).toLocaleString();
+}
+
 function createDefaultSettings(): SettingsData {
   return {
     notificationsEnabled: true,
@@ -58,7 +90,7 @@ function createDefaultSettings(): SettingsData {
     wakeTime: '07:00',
     achievementAlerts: true,
     limitWarnings: true,
-    dataCollection: true,
+    dataCollection: false,
     anonymizeData: true,
     googleFitConnected: false,
     appleHealthConnected: false,
@@ -67,48 +99,105 @@ function createDefaultSettings(): SettingsData {
   };
 }
 
+function createDefaultPolicy(): PrivacyPolicyData {
+  return {
+    version: 'v1.0',
+    updatedAt: '2026-03-27',
+    summary: [],
+    sections: [],
+    retentionOptions: [7, 30, 90, 180, 365],
+    securityPractices: [],
+    currentPrivacySettings: {
+      dataCollection: false,
+      anonymizeData: true,
+      allowAnalyticsForTraining: false,
+      retentionDays: 30,
+      consentGiven: false,
+      consentVersion: 'v1.0',
+      consentedAt: null,
+      policyLastViewedAt: null,
+      deletionRequestedAt: null,
+    },
+  };
+}
+
 export default function SettingsPrivacyScreen() {
   const { logout } = useAuth();
 
   const [settings, setSettings] = useState<SettingsData>(createDefaultSettings());
+  const [policy, setPolicy] = useState<PrivacyPolicyData>(createDefaultPolicy());
   const [selectedFocusAreas, setSelectedFocusAreas] = useState<string[]>([
     'Social Media',
     'Productivity',
   ]);
   const [customFocusAreas, setCustomFocusAreas] = useState('');
+  const [consentGiven, setConsentGiven] = useState(false);
+  const [allowAnalyticsForTraining, setAllowAnalyticsForTraining] = useState(false);
+  const [retentionDays, setRetentionDays] = useState<RetentionOption>(30);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     try {
       setRefreshing(true);
-      const res = await api.getSettings();
 
-      if (res?.settings) {
-        const mergedSettings: SettingsData = {
-          ...createDefaultSettings(),
-          ...res.settings,
-          focusAreas:
-            Array.isArray(res.settings.focusAreas) && res.settings.focusAreas.length
-              ? res.settings.focusAreas
-              : ['Social Media', 'Productivity'],
-          appLimits: Array.isArray(res.settings.appLimits)
-            ? res.settings.appLimits
-            : [],
-        };
+      const [settingsRes, policyRes] = await Promise.all([
+        api.getSettings(),
+        api.getPrivacyPolicy(),
+      ]);
 
-        setSettings(mergedSettings);
+      const nextPolicy = policyRes?.policy || createDefaultPolicy();
 
-        const focusAreas = mergedSettings.focusAreas || [];
-        setSelectedFocusAreas(
-          focusAreas.filter((item) => FOCUS_OPTIONS.includes(item))
-        );
-        setCustomFocusAreas(
-          focusAreas.filter((item) => !FOCUS_OPTIONS.includes(item)).join(', ')
-        );
-      }
+      const mergedSettings: SettingsData = {
+        ...createDefaultSettings(),
+        ...settingsRes?.settings,
+        dataCollection:
+          nextPolicy.currentPrivacySettings?.dataCollection ??
+          settingsRes?.settings?.dataCollection ??
+          false,
+        anonymizeData:
+          nextPolicy.currentPrivacySettings?.anonymizeData ??
+          settingsRes?.settings?.anonymizeData ??
+          true,
+        privacyModeEnabled:
+          nextPolicy.currentPrivacySettings?.anonymizeData ??
+          settingsRes?.settings?.privacyModeEnabled ??
+          true,
+        focusAreas:
+          Array.isArray(settingsRes?.settings?.focusAreas) &&
+          settingsRes.settings.focusAreas.length
+            ? settingsRes.settings.focusAreas
+            : ['Social Media', 'Productivity'],
+        appLimits: Array.isArray(settingsRes?.settings?.appLimits)
+          ? settingsRes.settings.appLimits
+          : [],
+      };
+
+      setSettings(mergedSettings);
+      setPolicy(nextPolicy);
+
+      const focusAreas = mergedSettings.focusAreas || [];
+      setSelectedFocusAreas(
+        focusAreas.filter((item) => FOCUS_OPTIONS.includes(item))
+      );
+      setCustomFocusAreas(
+        focusAreas.filter((item) => !FOCUS_OPTIONS.includes(item)).join(', ')
+      );
+
+      setConsentGiven(Boolean(nextPolicy.currentPrivacySettings?.consentGiven));
+      setAllowAnalyticsForTraining(
+        Boolean(nextPolicy.currentPrivacySettings?.allowAnalyticsForTraining)
+      );
+      setRetentionDays(
+        (Number(nextPolicy.currentPrivacySettings?.retentionDays || 30) ||
+          30) as RetentionOption
+      );
     } catch (error: any) {
-      Alert.alert('Settings error', error.message || 'Failed to load settings');
+      Alert.alert(
+        'Settings error',
+        error.message || 'Failed to load settings and privacy information'
+      );
     } finally {
       setRefreshing(false);
     }
@@ -124,6 +213,16 @@ export default function SettingsPrivacyScreen() {
 
     return merged.length ? merged : ['Social Media'];
   }, [selectedFocusAreas, customFocusAreas]);
+
+  const privacySummaryText = useMemo(() => {
+    if (!consentGiven) {
+      return 'Consent not given. Data collection and anonymized training use will stay disabled.';
+    }
+
+    return `Consent active • Retention ${retentionDays} days • Collection ${
+      settings.dataCollection ? 'On' : 'Off'
+    } • Anonymization ${settings.anonymizeData ? 'On' : 'Off'}`;
+  }, [consentGiven, retentionDays, settings.anonymizeData, settings.dataCollection]);
 
   const toggleFocusArea = (item: string) => {
     setSelectedFocusAreas((prev) =>
@@ -144,16 +243,30 @@ export default function SettingsPrivacyScreen() {
         focusAreas: finalFocusAreas,
         bedTime: normalizeTime(settings.bedTime, '23:00'),
         wakeTime: normalizeTime(settings.wakeTime, '07:00'),
+        dataCollection: consentGiven ? !!settings.dataCollection : false,
+        anonymizeData: !!settings.anonymizeData,
+        privacyModeEnabled: !!settings.anonymizeData,
         appLimits: Array.isArray(settings.appLimits) ? settings.appLimits : [],
       };
 
       await api.updateSettings(payload);
+
+      await api.savePrivacyConsent({
+        consentGiven,
+        dataCollection: consentGiven ? !!payload.dataCollection : false,
+        anonymizeData: !!payload.anonymizeData,
+        allowAnalyticsForTraining: consentGiven
+          ? allowAnalyticsForTraining
+          : false,
+        retentionDays,
+      });
+
       await syncDetoxNotifications();
       await runLocalInterventionCheck();
 
       Alert.alert(
         'Success',
-        'Settings saved. Real device reminders and detox alerts have been refreshed.'
+        'Settings, privacy consent, retention, and reminders were saved successfully.'
       );
 
       await load();
@@ -163,6 +276,35 @@ export default function SettingsPrivacyScreen() {
       setSaving(false);
     }
   };
+
+  const handleDeleteMyData = useCallback(() => {
+    Alert.alert(
+      'Delete my stored data',
+      'This will remove stored usage sessions, app limits, and notifications from the backend. Your account will still remain active.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete My Data',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setDeleting(true);
+              const res = await api.deleteMyData();
+              Alert.alert('Data deleted', res.message);
+              await load();
+            } catch (error: any) {
+              Alert.alert(
+                'Delete failed',
+                error.message || 'Could not delete your stored data'
+              );
+            } finally {
+              setDeleting(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [load]);
 
   return (
     <Screen
@@ -176,7 +318,8 @@ export default function SettingsPrivacyScreen() {
     >
       <Text style={styles.title}>Settings & Privacy</Text>
       <Text style={styles.subtitle}>
-        Fine-tune the preferences that shape your detox plan and dashboard coaching
+        Fine-tune the preferences that shape your detox plan, analytics, consent,
+        and privacy controls
       </Text>
 
       <View style={styles.card}>
@@ -213,8 +356,39 @@ export default function SettingsPrivacyScreen() {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Privacy</Text>
+        <Text style={styles.sectionTitle}>Privacy & Consent</Text>
 
+        <Text style={styles.meta}>
+          Policy version: {policy.version} • Updated: {policy.updatedAt}
+        </Text>
+        <Text style={styles.meta}>
+          Last consented at: {formatDateTime(policy.currentPrivacySettings?.consentedAt)}
+        </Text>
+        <Text style={styles.meta}>
+          Last policy view: {formatDateTime(policy.currentPrivacySettings?.policyLastViewedAt)}
+        </Text>
+
+        <Pressable
+          style={styles.consentRow}
+          onPress={() => setConsentGiven((prev) => !prev)}
+        >
+          <View style={[styles.checkbox, consentGiven && styles.checkboxChecked]}>
+            {consentGiven ? <Text style={styles.checkboxTick}>✓</Text> : null}
+          </View>
+          <Text style={styles.consentText}>
+            I have read the privacy policy and I give explicit consent for the
+            selected privacy settings.
+          </Text>
+        </Pressable>
+
+        <RowSwitch
+          label="Allow data collection"
+          value={!!settings.dataCollection}
+          disabled={!consentGiven}
+          onValueChange={(value) =>
+            setSettings((prev) => ({ ...prev, dataCollection: value }))
+          }
+        />
         <RowSwitch
           label="Anonymize data"
           value={!!settings.anonymizeData}
@@ -227,12 +401,61 @@ export default function SettingsPrivacyScreen() {
           }
         />
         <RowSwitch
-          label="Allow data collection"
-          value={!!settings.dataCollection}
-          onValueChange={(value) =>
-            setSettings((prev) => ({ ...prev, dataCollection: value }))
-          }
+          label="Allow anonymized dataset training"
+          value={!!allowAnalyticsForTraining}
+          disabled={!consentGiven}
+          onValueChange={setAllowAnalyticsForTraining}
         />
+
+        <Text style={styles.label}>Retention Period</Text>
+        <View style={styles.chipRow}>
+          {(policy.retentionOptions || [7, 30, 90, 180, 365]).map((item) => {
+            const active = retentionDays === item;
+
+            return (
+              <Pressable
+                key={String(item)}
+                style={[styles.chip, active && styles.chipActive]}
+                onPress={() => setRetentionDays(item as RetentionOption)}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                  {item} days
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <Text style={styles.helper}>{privacySummaryText}</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Privacy Policy Summary</Text>
+        {(policy.summary || []).map((item, index) => (
+          <Text key={`summary-${index}`} style={styles.bullet}>
+            • {item}
+          </Text>
+        ))}
+      </View>
+
+      {(policy.sections || []).map((section, index) => (
+        <View key={`${section.title}-${index}`} style={styles.card}>
+          <Text style={styles.sectionTitle}>{section.title}</Text>
+          {section.items.map((item, itemIndex) => (
+            <Text key={`${section.title}-${itemIndex}`} style={styles.bullet}>
+              • {item}
+            </Text>
+          ))}
+        </View>
+      ))}
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Security Practices</Text>
+        {(policy.securityPractices || []).map((item, index) => (
+          <Text key={`security-${index}`} style={styles.bullet}>
+            • {item}
+          </Text>
+        ))}
       </View>
 
       <View style={styles.card}>
@@ -352,9 +575,20 @@ export default function SettingsPrivacyScreen() {
           Nudges: {settings.aiInterventionsEnabled ? 'On' : 'Off'} • Summaries:{' '}
           {settings.notificationsEnabled ? 'On' : 'Off'}
         </Text>
+        <Text style={styles.previewText}>
+          Consent: {consentGiven ? 'Given' : 'Not Given'} • Retention: {retentionDays} days
+        </Text>
       </View>
 
       <PrimaryButton title="Save Settings" onPress={save} loading={saving} />
+      <View style={styles.buttonGap} />
+      <PrimaryButton
+        title="Delete My Stored Data"
+        onPress={handleDeleteMyData}
+        loading={deleting}
+        variant="secondary"
+      />
+      <View style={styles.buttonGap} />
       <PrimaryButton title="Logout" onPress={logout} variant="secondary" />
     </Screen>
   );
@@ -364,15 +598,17 @@ function RowSwitch({
   label,
   value,
   onValueChange,
+  disabled = false,
 }: {
   label: string;
   value: boolean;
   onValueChange: (value: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <View style={styles.row}>
-      <Text style={styles.rowText}>{label}</Text>
-      <Switch value={value} onValueChange={onValueChange} />
+      <Text style={[styles.rowText, disabled && styles.rowTextDisabled]}>{label}</Text>
+      <Switch value={value} onValueChange={onValueChange} disabled={disabled} />
     </View>
   );
 }
@@ -387,6 +623,7 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     marginTop: 8,
     marginBottom: 18,
+    lineHeight: 20,
   },
   card: {
     backgroundColor: '#111827',
@@ -402,6 +639,46 @@ const styles = StyleSheet.create({
     fontSize: 17,
     marginBottom: 10,
   },
+  meta: {
+    color: '#94A3B8',
+    marginBottom: 6,
+  },
+  bullet: {
+    color: '#CBD5E1',
+    lineHeight: 20,
+    marginBottom: 6,
+  },
+  consentRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#475569',
+    marginRight: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0F172A',
+    marginTop: 2,
+  },
+  checkboxChecked: {
+    backgroundColor: '#2563EB',
+    borderColor: '#3B82F6',
+  },
+  checkboxTick: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
+  consentText: {
+    flex: 1,
+    color: '#E2E8F0',
+    lineHeight: 20,
+  },
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -411,6 +688,9 @@ const styles = StyleSheet.create({
   rowText: {
     color: '#E2E8F0',
     fontWeight: '600',
+  },
+  rowTextDisabled: {
+    color: '#64748B',
   },
   label: {
     color: '#E2E8F0',
@@ -458,6 +738,7 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     fontSize: 12,
     marginBottom: 4,
+    lineHeight: 18,
   },
   themeRow: {
     flexDirection: 'row',
@@ -486,5 +767,9 @@ const styles = StyleSheet.create({
   previewText: {
     color: '#CBD5E1',
     marginBottom: 6,
+    lineHeight: 20,
+  },
+  buttonGap: {
+    height: 10,
   },
 });

@@ -1,8 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import notifee, { AndroidImportance } from '@notifee/react-native';
-import { NativeModules, Platform } from 'react-native';
-import { APP_CONFIG } from '../config/appConfig';
-import type { AppLimit, UsageApp } from '../types';
+import notifee, {AndroidImportance} from '@notifee/react-native';
+import {APP_CONFIG} from '../config/appConfig';
+import type {AppLimit, UsageApp} from '../types';
+import {usageTracker} from '../native/usageTracker';
 
 export type InterventionLevel = 'approaching_limit' | 'limit_reached';
 
@@ -34,19 +34,65 @@ const INTERVENTION_CHANNEL_ID = 'detox-interventions';
 const INTERVENTION_CHANNEL_NAME = 'Detox Interventions';
 const COOLDOWN_MINUTES = 30;
 
+const REQUEST_TIMEOUT_MS = 12000;
+const HEADERS_CACHE_MS = 15000;
+const SYNC_COOLDOWN_MS = 15000;
+
+let cachedHeaders: {value: Record<string, string>; at: number} | null = null;
+let inFlightRefreshPromise: Promise<UsageRefreshAndCheckResult> | null = null;
+let notificationChannelPromise: Promise<string> | null = null;
+let notificationPermissionPromise: Promise<unknown> | null = null;
+let lastSyncSignature = '';
+let lastSyncAt = 0;
+
 function buildUrl(path: string) {
   const normalizedBase = APP_CONFIG.API_BASE_URL.replace(/\/$/, '');
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   return `${normalizedBase}${normalizedPath}`;
 }
 
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    promise
+      .then(value => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch(error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
 async function getAuthHeaders() {
+  const now = Date.now();
+
+  if (cachedHeaders && now - cachedHeaders.at < HEADERS_CACHE_MS) {
+    return cachedHeaders.value;
+  }
+
   const token = await AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.TOKEN);
 
-  return {
+  const headers = {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(token ? {Authorization: `Bearer ${token}`} : {}),
   };
+
+  cachedHeaders = {
+    value: headers,
+    at: now,
+  };
+
+  return headers;
 }
 
 function firstString(...values: any[]): string {
@@ -55,16 +101,19 @@ function firstString(...values: any[]): string {
       return value.trim();
     }
   }
+
   return '';
 }
 
 function firstNumber(...values: any[]): number {
   for (const value of values) {
     const parsed = Number(value);
+
     if (Number.isFinite(parsed)) {
       return parsed;
     }
   }
+
   return 0;
 }
 
@@ -157,6 +206,7 @@ function normalizeUsageItem(item: any): UsageApp {
 function normalizeAppLimit(item: any): AppLimit {
   return {
     user: item?.user,
+    _id: item?._id,
     appName: firstString(item?.appName, item?.label, item?.name),
     appPackage: firstString(item?.appPackage, item?.packageName, item?.package),
     category: firstString(item?.category, 'Other'),
@@ -170,70 +220,127 @@ function normalizeAppLimit(item: any): AppLimit {
         ),
       ),
     ),
+    createdAt: item?.createdAt,
+    updatedAt: item?.updatedAt,
   } as AppLimit;
 }
 
-function buildSummary(apps: UsageApp[]): UsageSummary {
+function sanitizeUsageApp(app: UsageApp): UsageApp {
+  const packageName = firstString(app?.packageName);
+  const appName = firstString(app?.appName, packageName, 'Unknown App');
+
   return {
-    totalMinutes: apps.reduce(
-      (sum, app) => sum + Math.max(0, Number(app.minutesUsed || 0)),
-      0,
-    ),
-    totalPickups: apps.reduce(
-      (sum, app) => sum + Math.max(0, Number(app.pickups || 0)),
-      0,
-    ),
-    totalUnlocks: apps.reduce(
-      (sum, app) => sum + Math.max(0, Number(app.unlocks || 0)),
-      0,
-    ),
-    appCount: apps.length,
+    packageName,
+    appName,
+    foregroundMs: Math.max(0, Math.round(Number(app?.foregroundMs || 0))),
+    minutesUsed: Math.max(0, Math.round(Number(app?.minutesUsed || 0))),
+    lastTimeUsed: firstNumber(app?.lastTimeUsed),
+    pickups: Math.max(0, Math.round(Number(app?.pickups || 0))),
+    unlocks: Math.max(0, Math.round(Number(app?.unlocks || 0))),
+    category: firstString(app?.category, 'Other'),
   };
 }
 
-async function readLatestAndroidUsage(): Promise<UsageApp[]> {
-  if (Platform.OS !== 'android') {
-    return [];
-  }
+function mergeAppsByPackage(apps: UsageApp[]): UsageApp[] {
+  const mergedMap = new Map<string, UsageApp>();
 
-  const usageStatsModule = NativeModules?.UsageStatsModule;
+  for (const rawApp of apps) {
+    const app = sanitizeUsageApp(rawApp);
 
-  if (!usageStatsModule) {
-    throw new Error(
-      'UsageStatsModule is not linked. Please check your Android usage bridge setup.',
-    );
-  }
-
-  const candidateMethods = [
-    'getTodayUsageStats',
-    'getTodayUsage',
-    'fetchTodayUsage',
-    'getUsageStats',
-  ];
-
-  let rawResult: any = null;
-
-  for (const methodName of candidateMethods) {
-    if (typeof usageStatsModule[methodName] === 'function') {
-      rawResult = await usageStatsModule[methodName]();
-      break;
+    if (!app.packageName) {
+      continue;
     }
+
+    const existing = mergedMap.get(app.packageName);
+
+    if (!existing) {
+      mergedMap.set(app.packageName, app);
+      continue;
+    }
+
+    mergedMap.set(app.packageName, {
+      packageName: app.packageName,
+      appName:
+        existing.appName && existing.appName !== existing.packageName
+          ? existing.appName
+          : app.appName,
+      foregroundMs:
+        Math.max(0, Number(existing.foregroundMs || 0)) +
+        Math.max(0, Number(app.foregroundMs || 0)),
+      minutesUsed:
+        Math.max(0, Number(existing.minutesUsed || 0)) +
+        Math.max(0, Number(app.minutesUsed || 0)),
+      lastTimeUsed: Math.max(
+        Number(existing.lastTimeUsed || 0),
+        Number(app.lastTimeUsed || 0),
+      ),
+      pickups:
+        Math.max(0, Number(existing.pickups || 0)) +
+        Math.max(0, Number(app.pickups || 0)),
+      unlocks:
+        Math.max(0, Number(existing.unlocks || 0)) +
+        Math.max(0, Number(app.unlocks || 0)),
+      category:
+        existing.category && existing.category !== 'Other'
+          ? existing.category
+          : app.category || 'Other',
+    });
   }
 
-  if (!rawResult) {
-    throw new Error(
-      'No supported usage method was found on UsageStatsModule.',
-    );
-  }
+  return Array.from(mergedMap.values()).sort(
+    (a, b) => b.minutesUsed - a.minutesUsed,
+  );
+}
 
-  return extractArray(rawResult)
-    .map(normalizeUsageItem)
-    .filter(item => item.packageName)
-    .sort((a, b) => b.minutesUsed - a.minutesUsed);
+function buildSummary(apps: UsageApp[]): UsageSummary {
+  const mergedApps = mergeAppsByPackage(apps);
+
+  return {
+    totalMinutes: mergedApps.reduce(
+      (sum, app) => sum + Math.max(0, Number(app.minutesUsed || 0)),
+      0,
+    ),
+    totalPickups: mergedApps.reduce(
+      (sum, app) => sum + Math.max(0, Number(app.pickups || 0)),
+      0,
+    ),
+    totalUnlocks: mergedApps.reduce(
+      (sum, app) => sum + Math.max(0, Number(app.unlocks || 0)),
+      0,
+    ),
+    appCount: mergedApps.length,
+  };
+}
+
+function buildUsageSignature(apps: UsageApp[]) {
+  return mergeAppsByPackage(apps)
+    .map(app =>
+      [
+        app.packageName,
+        Math.round(Number(app.minutesUsed || 0)),
+        Math.round(Number(app.pickups || 0)),
+        Math.round(Number(app.unlocks || 0)),
+      ].join(':'),
+    )
+    .sort()
+    .join('|');
 }
 
 async function syncUsageToBackend(apps: UsageApp[]) {
-  if (!apps.length) {
+  const mergedApps = mergeAppsByPackage(apps);
+
+  if (!mergedApps.length) {
+    return;
+  }
+
+  const signature = buildUsageSignature(mergedApps);
+  const nowMs = Date.now();
+
+  if (
+    signature &&
+    signature === lastSyncSignature &&
+    nowMs - lastSyncAt < SYNC_COOLDOWN_MS
+  ) {
     return;
   }
 
@@ -242,7 +349,7 @@ async function syncUsageToBackend(apps: UsageApp[]) {
   const startOfDay = new Date(now);
   startOfDay.setHours(0, 0, 0, 0);
 
-  const payload = apps.map(app => ({
+  const payload = mergedApps.map(app => ({
     appName: app.appName,
     appPackage: app.packageName,
     category: app.category || 'Other',
@@ -254,15 +361,19 @@ async function syncUsageToBackend(apps: UsageApp[]) {
     endTime: now.toISOString(),
   }));
 
-  const response = await fetch(buildUrl('/usage/ingest'), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      sessions: payload,
-      apps: payload,
-      usage: payload,
+  const response = await withTimeout(
+    fetch(buildUrl('/usage/ingest'), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        sessions: payload,
+        apps: payload,
+        usage: payload,
+      }),
     }),
-  });
+    REQUEST_TIMEOUT_MS,
+    'Usage sync timed out.',
+  );
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -270,15 +381,22 @@ async function syncUsageToBackend(apps: UsageApp[]) {
       `Failed to sync usage to backend. ${errorText || response.status}`,
     );
   }
+
+  lastSyncSignature = signature;
+  lastSyncAt = nowMs;
 }
 
 async function fetchTodayUsageFromBackend(): Promise<UsageApp[]> {
   const headers = await getAuthHeaders();
 
-  const response = await fetch(buildUrl('/usage/today'), {
-    method: 'GET',
-    headers,
-  });
+  const response = await withTimeout(
+    fetch(buildUrl('/usage/today'), {
+      method: 'GET',
+      headers,
+    }),
+    REQUEST_TIMEOUT_MS,
+    'Fetching today usage timed out.',
+  );
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -289,19 +407,24 @@ async function fetchTodayUsageFromBackend(): Promise<UsageApp[]> {
 
   const json = await response.json();
 
-  return extractArray(json)
+  const normalizedApps = extractArray(json)
     .map(normalizeUsageItem)
-    .filter(item => item.packageName)
-    .sort((a, b) => b.minutesUsed - a.minutesUsed);
+    .filter(item => item.packageName);
+
+  return mergeAppsByPackage(normalizedApps);
 }
 
 async function fetchAppLimitsFromBackend(): Promise<AppLimit[]> {
   const headers = await getAuthHeaders();
 
-  const response = await fetch(buildUrl('/settings'), {
-    method: 'GET',
-    headers,
-  });
+  const response = await withTimeout(
+    fetch(buildUrl('/settings'), {
+      method: 'GET',
+      headers,
+    }),
+    REQUEST_TIMEOUT_MS,
+    'Fetching app limits timed out.',
+  );
 
   if (!response.ok) {
     return [];
@@ -334,7 +457,7 @@ function buildInterventionCandidates(
 ): TriggeredWarning[] {
   const appMap = new Map<string, UsageApp>();
 
-  apps.forEach(app => {
+  mergeAppsByPackage(apps).forEach(app => {
     if (app.packageName) {
       appMap.set(app.packageName, app);
     }
@@ -403,10 +526,7 @@ function buildInterventionCandidates(
   });
 }
 
-function buildCooldownKey(
-  appPackage: string,
-  level: InterventionLevel,
-): string {
+function buildCooldownKey(appPackage: string, level: InterventionLevel): string {
   const day = new Date().toISOString().slice(0, 10);
   return `detox_intervention_${day}_${level}_${appPackage}`;
 }
@@ -440,14 +560,26 @@ async function markWarningSent(
   await AsyncStorage.setItem(key, String(Date.now()));
 }
 
-async function showLocalInterventionNotification(warning: TriggeredWarning) {
-  await notifee.requestPermission();
+async function ensureNotificationReady() {
+  if (!notificationPermissionPromise) {
+    notificationPermissionPromise = notifee.requestPermission();
+  }
 
-  const channelId = await notifee.createChannel({
-    id: INTERVENTION_CHANNEL_ID,
-    name: INTERVENTION_CHANNEL_NAME,
-    importance: AndroidImportance.HIGH,
-  });
+  await notificationPermissionPromise;
+
+  if (!notificationChannelPromise) {
+    notificationChannelPromise = notifee.createChannel({
+      id: INTERVENTION_CHANNEL_ID,
+      name: INTERVENTION_CHANNEL_NAME,
+      importance: AndroidImportance.HIGH,
+    });
+  }
+
+  return notificationChannelPromise;
+}
+
+async function showLocalInterventionNotification(warning: TriggeredWarning) {
+  const channelId = await ensureNotificationReady();
 
   const title =
     warning.level === 'limit_reached'
@@ -470,6 +602,10 @@ async function showLocalInterventionNotification(warning: TriggeredWarning) {
 async function triggerImmediateWarnings(
   candidates: TriggeredWarning[],
 ): Promise<TriggeredWarning[]> {
+  if (!candidates.length) {
+    return [];
+  }
+
   const triggered: TriggeredWarning[] = [];
 
   for (const warning of candidates) {
@@ -479,35 +615,77 @@ async function triggerImmediateWarnings(
       continue;
     }
 
-    await showLocalInterventionNotification(warning);
-    await markWarningSent(warning.appPackage, warning.level);
-    triggered.push(warning);
+    try {
+      await showLocalInterventionNotification(warning);
+      await markWarningSent(warning.appPackage, warning.level);
+      triggered.push(warning);
+    } catch {
+      continue;
+    }
   }
 
   return triggered;
 }
 
 export async function refreshUsageAndRunImmediateInterventionCheck(): Promise<UsageRefreshAndCheckResult> {
-  const latestDeviceUsage = await readLatestAndroidUsage();
-
-  await syncUsageToBackend(latestDeviceUsage);
-
-  let appsFromBackend: UsageApp[] = [];
-  try {
-    appsFromBackend = await fetchTodayUsageFromBackend();
-  } catch {
-    appsFromBackend = latestDeviceUsage;
+  if (inFlightRefreshPromise) {
+    return inFlightRefreshPromise;
   }
 
-  const appLimits = await fetchAppLimitsFromBackend();
-  const summary = buildSummary(appsFromBackend);
-  const candidates = buildInterventionCandidates(appsFromBackend, appLimits);
-  const triggeredWarnings = await triggerImmediateWarnings(candidates);
+  inFlightRefreshPromise = (async () => {
+    let latestDeviceUsage: UsageApp[] = [];
 
-  return {
-    apps: appsFromBackend,
-    appLimits,
-    summary,
-    triggeredWarnings,
-  };
+    try {
+      const rawDeviceUsage = await withTimeout(
+        usageTracker.getTodayUsage(),
+        REQUEST_TIMEOUT_MS,
+        'Reading Android usage took too long.',
+      );
+
+      latestDeviceUsage = mergeAppsByPackage(
+        extractArray(rawDeviceUsage)
+          .map(normalizeUsageItem)
+          .filter(item => item.packageName),
+      );
+    } catch {
+      latestDeviceUsage = [];
+    }
+
+    const appLimitsPromise = fetchAppLimitsFromBackend().catch(() => []);
+
+    const syncPromise = latestDeviceUsage.length
+      ? syncUsageToBackend(latestDeviceUsage).catch(() => undefined)
+      : Promise.resolve();
+
+    let appsForUi = latestDeviceUsage;
+
+    if (!appsForUi.length) {
+      try {
+        appsForUi = await fetchTodayUsageFromBackend();
+      } catch {
+        appsForUi = [];
+      }
+    }
+
+    await syncPromise;
+    const appLimits = await appLimitsPromise;
+
+    const mergedAppsForUi = mergeAppsByPackage(appsForUi);
+    const summary = buildSummary(mergedAppsForUi);
+    const candidates = buildInterventionCandidates(mergedAppsForUi, appLimits);
+    const triggeredWarnings = await triggerImmediateWarnings(candidates);
+
+    return {
+      apps: mergedAppsForUi,
+      appLimits,
+      summary,
+      triggeredWarnings,
+    };
+  })();
+
+  try {
+    return await inFlightRefreshPromise;
+  } finally {
+    inFlightRefreshPromise = null;
+  }
 }

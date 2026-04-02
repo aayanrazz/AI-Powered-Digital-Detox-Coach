@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -11,14 +11,14 @@ import {
   View,
 } from 'react-native';
 import Screen from '../components/Screen';
-import { api } from '../api/api';
-import type { AppLimit, UsageApp } from '../types';
+import {api} from '../api/api';
+import type {AppLimit, UsageApp} from '../types';
 import {
   refreshUsageAndRunImmediateInterventionCheck,
   type TriggeredWarning,
   type UsageSummary,
 } from '../services/usageIntervention.service';
-import { usageTracker } from '../native/usageTracker';
+import {usageTracker} from '../native/usageTracker';
 
 function formatMinutes(minutes: number) {
   const safeMinutes = Math.max(0, Math.round(Number(minutes || 0)));
@@ -59,7 +59,83 @@ function toValidLimitMinutes(value: string) {
   return Math.max(1, Math.min(1440, Math.round(parsed)));
 }
 
+function mergeAppsForUi(apps: UsageApp[]) {
+  const map = new Map<string, UsageApp>();
+
+  apps.forEach(rawApp => {
+    if (!rawApp?.packageName) {
+      return;
+    }
+
+    const existing = map.get(rawApp.packageName);
+
+    if (!existing) {
+      map.set(rawApp.packageName, {
+        ...rawApp,
+        appName: rawApp.appName || rawApp.packageName,
+        category: rawApp.category || 'Other',
+      });
+      return;
+    }
+
+    map.set(rawApp.packageName, {
+      ...existing,
+      appName:
+        existing.appName && existing.appName !== existing.packageName
+          ? existing.appName
+          : rawApp.appName || existing.appName || rawApp.packageName,
+      foregroundMs:
+        Math.max(0, Number(existing.foregroundMs || 0)) +
+        Math.max(0, Number(rawApp.foregroundMs || 0)),
+      minutesUsed:
+        Math.max(0, Number(existing.minutesUsed || 0)) +
+        Math.max(0, Number(rawApp.minutesUsed || 0)),
+      lastTimeUsed: Math.max(
+        Number(existing.lastTimeUsed || 0),
+        Number(rawApp.lastTimeUsed || 0),
+      ),
+      pickups:
+        Math.max(0, Number(existing.pickups || 0)) +
+        Math.max(0, Number(rawApp.pickups || 0)),
+      unlocks:
+        Math.max(0, Number(existing.unlocks || 0)) +
+        Math.max(0, Number(rawApp.unlocks || 0)),
+      category:
+        existing.category && existing.category !== 'Other'
+          ? existing.category
+          : rawApp.category || existing.category || 'Other',
+    });
+  });
+
+  return Array.from(map.values()).sort((a, b) => b.minutesUsed - a.minutesUsed);
+}
+
 const QUICK_LIMIT_OPTIONS = [30, 60, 90, 120, 180];
+const REFRESH_COOLDOWN_MS = 15000;
+const PERMISSION_CACHE_MS = 10000;
+const REFRESH_TIMEOUT_MS = 15000;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    promise
+      .then(value => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch(error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
 
 export default function UsageMonitoringScreen() {
   const [apps, setApps] = useState<UsageApp[]>([]);
@@ -70,21 +146,38 @@ export default function UsageMonitoringScreen() {
     totalUnlocks: 0,
     appCount: 0,
   });
-  const [triggeredWarnings, setTriggeredWarnings] = useState<TriggeredWarning[]>([]);
+  const [triggeredWarnings, setTriggeredWarnings] = useState<
+    TriggeredWarning[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState('');
   const [error, setError] = useState('');
-  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
-  const [openingPermissionSettings, setOpeningPermissionSettings] = useState(false);
+  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(
+    null,
+  );
+  const [openingPermissionSettings, setOpeningPermissionSettings] =
+    useState(false);
   const [expandedEditorPackage, setExpandedEditorPackage] = useState('');
   const [limitInputValue, setLimitInputValue] = useState('');
   const [savingLimitPackage, setSavingLimitPackage] = useState('');
 
+  const isMountedRef = useRef(true);
+  const hasLoadedOnceRef = useRef(false);
+  const inFlightRefreshRef = useRef<Promise<unknown> | null>(null);
+  const lastRefreshAtRef = useRef(0);
+  const permissionCacheRef = useRef<{
+    value: boolean | null;
+    checkedAt: number;
+  }>({
+    value: null,
+    checkedAt: 0,
+  });
+
   const appLimitMap = useMemo(() => {
     const map = new Map<string, AppLimit>();
 
-    appLimits.forEach((limit) => {
+    appLimits.forEach(limit => {
       if (limit.appPackage) {
         map.set(limit.appPackage, limit);
       }
@@ -93,18 +186,49 @@ export default function UsageMonitoringScreen() {
     return map;
   }, [appLimits]);
 
-  const checkUsagePermission = useCallback(async () => {
+  const checkUsagePermission = useCallback(async (force = false) => {
+    const now = Date.now();
+
+    if (
+      !force &&
+      permissionCacheRef.current.value !== null &&
+      now - permissionCacheRef.current.checkedAt < PERMISSION_CACHE_MS
+    ) {
+      return permissionCacheRef.current.value;
+    }
+
     try {
       const granted = await usageTracker.isPermissionGranted();
-      setPermissionGranted(granted);
+
+      permissionCacheRef.current = {
+        value: granted,
+        checkedAt: now,
+      };
+
+      if (isMountedRef.current) {
+        setPermissionGranted(granted);
+      }
+
       return granted;
     } catch {
-      setPermissionGranted(false);
+      permissionCacheRef.current = {
+        value: false,
+        checkedAt: now,
+      };
+
+      if (isMountedRef.current) {
+        setPermissionGranted(false);
+      }
+
       return false;
     }
   }, []);
 
   const resetUsageState = useCallback(() => {
+    if (!isMountedRef.current) {
+      return;
+    }
+
     setApps([]);
     setAppLimits([]);
     setSummary({
@@ -117,22 +241,34 @@ export default function UsageMonitoringScreen() {
     setLastUpdatedAt('');
   }, []);
 
-  const applyRefreshResult = useCallback((result: {
-    apps: UsageApp[];
-    appLimits: AppLimit[];
-    summary: UsageSummary;
-    triggeredWarnings: TriggeredWarning[];
-  }) => {
-    setApps(result.apps);
-    setAppLimits(result.appLimits);
-    setSummary(result.summary);
-    setTriggeredWarnings(result.triggeredWarnings);
-    setLastUpdatedAt(new Date().toLocaleTimeString());
-  }, []);
+  const applyRefreshResult = useCallback(
+    (result: {
+      apps: UsageApp[];
+      appLimits: AppLimit[];
+      summary: UsageSummary;
+      triggeredWarnings: TriggeredWarning[];
+    }) => {
+      if (!isMountedRef.current) {
+        return;
+      }
+
+      setApps(mergeAppsForUi(result.apps));
+      setAppLimits(result.appLimits);
+      setSummary(result.summary);
+      setTriggeredWarnings(result.triggeredWarnings);
+      setLastUpdatedAt(new Date().toLocaleTimeString());
+    },
+    [],
+  );
 
   const refreshUsageState = useCallback(
     async (showPopup: boolean) => {
-      const result = await refreshUsageAndRunImmediateInterventionCheck();
+      const result = await withTimeout(
+        refreshUsageAndRunImmediateInterventionCheck(),
+        REFRESH_TIMEOUT_MS,
+        'Refreshing usage took too long. Please try again.',
+      );
+
       applyRefreshResult(result);
 
       if (showPopup && result.triggeredWarnings.length > 0) {
@@ -142,60 +278,113 @@ export default function UsageMonitoringScreen() {
           firstWarning.level === 'limit_reached'
             ? 'Immediate Intervention Triggered'
             : 'Usage Warning Triggered',
-          firstWarning.message
+          firstWarning.message,
         );
       }
 
       return result;
     },
-    [applyRefreshResult]
+    [applyRefreshResult],
   );
 
-  const runRefresh = useCallback(
-    async (showPopup: boolean) => {
-      setError('');
-
-      const granted = await checkUsagePermission();
-
-      if (!granted) {
-        resetUsageState();
-        const message =
-          'Usage access permission is not granted. Please tap "Grant Access" and enable usage access in Android settings.';
-        setError(message);
-
-        if (showPopup) {
-          Alert.alert('Permission Required', message);
-        }
-
-        return;
+  const performRefresh = useCallback(
+    async ({
+      showPopup = false,
+      forcePermissionCheck = false,
+      showLoader = false,
+    }: {
+      showPopup?: boolean;
+      forcePermissionCheck?: boolean;
+      showLoader?: boolean;
+    } = {}) => {
+      if (inFlightRefreshRef.current) {
+        return inFlightRefreshRef.current;
       }
 
-      try {
-        await refreshUsageState(showPopup);
-      } catch (err: any) {
-        const message =
-          err?.message || 'Failed to refresh usage and run intervention checks.';
-        setError(message);
-
-        if (showPopup) {
-          Alert.alert('Refresh Failed', message);
+      const task = (async () => {
+        if (showLoader && !hasLoadedOnceRef.current && isMountedRef.current) {
+          setLoading(true);
         }
-      }
+
+        if (showPopup && isMountedRef.current) {
+          setRefreshing(true);
+        }
+
+        if (isMountedRef.current) {
+          setError('');
+        }
+
+        const granted = await checkUsagePermission(forcePermissionCheck);
+
+        if (!granted) {
+          resetUsageState();
+
+          const message =
+            'Usage access permission is not granted. Please tap "Grant Access" and enable usage access in Android settings.';
+
+          if (isMountedRef.current) {
+            setError(message);
+            setLoading(false);
+            setRefreshing(false);
+          }
+
+          if (showPopup) {
+            Alert.alert('Permission Required', message);
+          }
+
+          return null;
+        }
+
+        try {
+          const result = await refreshUsageState(showPopup);
+          hasLoadedOnceRef.current = true;
+          lastRefreshAtRef.current = Date.now();
+          return result;
+        } catch (err: any) {
+          const message =
+            err?.message || 'Failed to refresh usage and run intervention checks.';
+
+          if (isMountedRef.current) {
+            setError(message);
+          }
+
+          if (showPopup) {
+            Alert.alert('Refresh Failed', message);
+          }
+
+          return null;
+        } finally {
+          if (isMountedRef.current) {
+            setLoading(false);
+            setRefreshing(false);
+          }
+        }
+      })();
+
+      inFlightRefreshRef.current = task.finally(() => {
+        inFlightRefreshRef.current = null;
+      });
+
+      return inFlightRefreshRef.current;
     },
-    [checkUsagePermission, refreshUsageState, resetUsageState]
+    [checkUsagePermission, refreshUsageState, resetUsageState],
   );
 
   const loadInitial = useCallback(async () => {
-    setLoading(true);
-    await runRefresh(false);
-    setLoading(false);
-  }, [runRefresh]);
+    await performRefresh({
+      showPopup: false,
+      forcePermissionCheck: false,
+      showLoader: true,
+    });
+  }, [performRefresh]);
 
   const handlePullToRefresh = useCallback(async () => {
-    setRefreshing(true);
-    await runRefresh(true);
-    setRefreshing(false);
-  }, [runRefresh]);
+    await performRefresh({
+      showPopup: true,
+      forcePermissionCheck: true,
+      showLoader: false,
+    });
+  }, [performRefresh]);
 
   const handleOpenPermissionSettings = useCallback(async () => {
     try {
@@ -204,7 +393,7 @@ export default function UsageMonitoringScreen() {
     } catch {
       Alert.alert(
         'Unable to open settings',
-        'Please open Android Settings manually and enable Usage Access for this app.'
+        'Please open Android Settings manually and enable Usage Access for this app.',
       );
     } finally {
       setOpeningPermissionSettings(false);
@@ -214,17 +403,21 @@ export default function UsageMonitoringScreen() {
   const openLimitEditor = useCallback(
     (app: UsageApp) => {
       const currentLimit = appLimitMap.get(app.packageName)?.dailyLimitMinutes;
-      setExpandedEditorPackage((prev) =>
-        prev === app.packageName ? '' : app.packageName
+
+      setExpandedEditorPackage(prev =>
+        prev === app.packageName ? '' : app.packageName,
       );
       setLimitInputValue(currentLimit ? String(currentLimit) : '');
     },
-    [appLimitMap]
+    [appLimitMap],
   );
 
   const saveLimitForApp = useCallback(
     async (app: UsageApp, dailyLimitMinutes: number) => {
-      const safeMinutes = Math.max(1, Math.min(1440, Math.round(dailyLimitMinutes)));
+      const safeMinutes = Math.max(
+        1,
+        Math.min(1440, Math.round(dailyLimitMinutes)),
+      );
 
       try {
         setSavingLimitPackage(app.packageName);
@@ -237,28 +430,46 @@ export default function UsageMonitoringScreen() {
           dailyLimitMinutes: safeMinutes,
         });
 
-        const result = await refreshUsageState(true);
-        const updatedLimit = result.appLimits.find(
-          (item) => item.appPackage === app.packageName
-        );
+        const optimisticLimit: AppLimit = {
+          _id: `local-${app.packageName}`,
+          appName: app.appName,
+          appPackage: app.packageName,
+          category: app.category || 'Other',
+          dailyLimitMinutes: safeMinutes,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        setAppLimits(prev => {
+          const filtered = prev.filter(
+            item => item.appPackage !== app.packageName,
+          );
+          return [optimisticLimit, ...filtered];
+        });
 
         setExpandedEditorPackage('');
-        setLimitInputValue(updatedLimit ? String(updatedLimit.dailyLimitMinutes) : '');
+        setLimitInputValue(String(safeMinutes));
+
+        performRefresh({
+          showPopup: false,
+          forcePermissionCheck: false,
+          showLoader: false,
+        }).catch(() => {});
 
         Alert.alert(
           'Limit saved',
-          `${app.appName} now has a ${safeMinutes}-minute daily limit. Immediate feedback is active after every refresh.`
+          `${app.appName} now has a ${safeMinutes}-minute daily limit.`,
         );
       } catch (err: any) {
         Alert.alert(
           'Save failed',
-          err?.message || 'Unable to save this app limit right now.'
+          err?.message || 'Unable to save this app limit right now.',
         );
       } finally {
         setSavingLimitPackage('');
       }
     },
-    [refreshUsageState]
+    [performRefresh],
   );
 
   const handleSaveCustomLimit = useCallback(
@@ -266,13 +477,16 @@ export default function UsageMonitoringScreen() {
       const safeMinutes = toValidLimitMinutes(limitInputValue);
 
       if (!safeMinutes) {
-        Alert.alert('Invalid limit', 'Please enter a valid limit between 1 and 1440 minutes.');
+        Alert.alert(
+          'Invalid limit',
+          'Please enter a valid limit between 1 and 1440 minutes.',
+        );
         return;
       }
 
       await saveLimitForApp(app, safeMinutes);
     },
-    [limitInputValue, saveLimitForApp]
+    [limitInputValue, saveLimitForApp],
   );
 
   const handleQuickLimit = useCallback(
@@ -280,7 +494,7 @@ export default function UsageMonitoringScreen() {
       setLimitInputValue(String(minutes));
       await saveLimitForApp(app, minutes);
     },
-    [saveLimitForApp]
+    [saveLimitForApp],
   );
 
   const handleRemoveLimit = useCallback(
@@ -289,7 +503,7 @@ export default function UsageMonitoringScreen() {
         'Remove app limit',
         `Do you want to remove the daily limit for ${app.appName}?`,
         [
-          { text: 'Cancel', style: 'cancel' },
+          {text: 'Cancel', style: 'cancel'},
           {
             text: 'Remove',
             style: 'destructive',
@@ -297,52 +511,80 @@ export default function UsageMonitoringScreen() {
               try {
                 setSavingLimitPackage(app.packageName);
                 setError('');
+
                 await api.deleteAppLimit(app.packageName);
-                await refreshUsageState(false);
+
+                setAppLimits(prev =>
+                  prev.filter(item => item.appPackage !== app.packageName),
+                );
+
                 setExpandedEditorPackage('');
                 setLimitInputValue('');
+
+                performRefresh({
+                  showPopup: false,
+                  forcePermissionCheck: false,
+                  showLoader: false,
+                }).catch(() => {});
+
                 Alert.alert(
                   'Limit removed',
-                  `${app.appName} no longer has a custom daily limit.`
+                  `${app.appName} no longer has a custom daily limit.`,
                 );
               } catch (err: any) {
                 Alert.alert(
                   'Remove failed',
-                  err?.message || 'Unable to remove this app limit right now.'
+                  err?.message || 'Unable to remove this app limit right now.',
                 );
               } finally {
                 setSavingLimitPackage('');
               }
             },
           },
-        ]
+        ],
       );
     },
-    [refreshUsageState]
+    [performRefresh],
   );
 
   useEffect(() => {
+    isMountedRef.current = true;
     loadInitial();
+
+    return () => {
+      isMountedRef.current = false;
+    };
   }, [loadInitial]);
 
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', async nextState => {
-      if (nextState === 'active') {
-        const granted = await checkUsagePermission();
+    const subscription = AppState.addEventListener('change', nextState => {
+      if (nextState !== 'active') {
+        return;
+      }
 
-        if (granted) {
-          await runRefresh(false);
-        }
+      if (inFlightRefreshRef.current) {
+        return;
+      }
+
+      const now = Date.now();
+      const isStale = now - lastRefreshAtRef.current > REFRESH_COOLDOWN_MS;
+
+      if (isStale) {
+        performRefresh({
+          showPopup: false,
+          forcePermissionCheck: false,
+          showLoader: false,
+        }).catch(() => {});
       }
     });
 
     return () => {
       subscription.remove();
     };
-  }, [checkUsagePermission, runRefresh]);
+  }, [performRefresh]);
 
   const sortedApps = useMemo(() => {
-    return [...apps].sort((a, b) => b.minutesUsed - a.minutesUsed);
+    return mergeAppsForUi(apps);
   }, [apps]);
 
   return (
@@ -353,8 +595,7 @@ export default function UsageMonitoringScreen() {
           onRefresh={handlePullToRefresh}
           tintColor="#ffffff"
         />
-      }
-    >
+      }>
       <View style={styles.header}>
         <View style={styles.headerTextWrap}>
           <Text style={styles.title}>Usage Monitoring</Text>
@@ -367,15 +608,14 @@ export default function UsageMonitoringScreen() {
           style={styles.refreshButton}
           onPress={handlePullToRefresh}
           disabled={refreshing || loading}
-          activeOpacity={0.85}
-        >
+          activeOpacity={0.85}>
           <Text style={styles.refreshButtonText}>
             {refreshing ? 'Refreshing...' : 'Refresh'}
           </Text>
         </TouchableOpacity>
       </View>
 
-      {loading ? (
+      {loading && apps.length === 0 ? (
         <View style={styles.loaderContainer}>
           <ActivityIndicator size="large" color="#A78BFA" />
           <Text style={styles.loaderText}>
@@ -396,8 +636,7 @@ export default function UsageMonitoringScreen() {
                 style={styles.permissionButton}
                 onPress={handleOpenPermissionSettings}
                 disabled={openingPermissionSettings}
-                activeOpacity={0.85}
-              >
+                activeOpacity={0.85}>
                 <Text style={styles.permissionButtonText}>
                   {openingPermissionSettings ? 'Opening...' : 'Grant Access'}
                 </Text>
@@ -451,24 +690,22 @@ export default function UsageMonitoringScreen() {
             <View style={styles.warningSection}>
               <Text style={styles.sectionTitle}>Triggered right now</Text>
 
-              {triggeredWarnings.map((warning) => (
+              {triggeredWarnings.map((warning, index) => (
                 <View
-                  key={`${warning.level}_${warning.appPackage}`}
+                  key={`${warning.level}_${warning.appPackage}_${index}`}
                   style={[
                     styles.warningCard,
                     warning.level === 'limit_reached'
                       ? styles.warningCardDanger
                       : styles.warningCardSoft,
-                  ]}
-                >
+                  ]}>
                   <Text
                     style={[
                       styles.warningTitle,
                       warning.level === 'limit_reached'
                         ? styles.warningTitleDanger
                         : styles.warningTitleWarning,
-                    ]}
-                  >
+                    ]}>
                     {warning.level === 'limit_reached'
                       ? 'Limit reached'
                       : 'Approaching limit'}
@@ -491,10 +728,13 @@ export default function UsageMonitoringScreen() {
                 </Text>
               </View>
             ) : (
-              sortedApps.map((app) => {
+              sortedApps.map((app, index) => {
                 const limit = appLimitMap.get(app.packageName);
                 const limitMinutes = limit?.dailyLimitMinutes || 0;
-                const progress = getProgressPercent(app.minutesUsed, limitMinutes);
+                const progress = getProgressPercent(
+                  app.minutesUsed,
+                  limitMinutes,
+                );
                 const isNearLimit = limitMinutes > 0 && progress >= 80;
                 const isOverLimit =
                   limitMinutes > 0 && app.minutesUsed >= limitMinutes;
@@ -502,7 +742,9 @@ export default function UsageMonitoringScreen() {
                 const isSavingThisApp = savingLimitPackage === app.packageName;
 
                 return (
-                  <View key={app.packageName} style={styles.appCard}>
+                  <View
+                    key={`${app.packageName}_${index}`}
+                    style={styles.appCard}>
                     <View style={styles.appTopRow}>
                       <View style={styles.appTitleWrap}>
                         <Text style={styles.appName}>{app.appName}</Text>
@@ -515,9 +757,15 @@ export default function UsageMonitoringScreen() {
                     </View>
 
                     <View style={styles.metaRow}>
-                      <Text style={styles.metaText}>Pickups: {app.pickups || 0}</Text>
-                      <Text style={styles.metaText}>Unlocks: {app.unlocks || 0}</Text>
-                      <Text style={styles.metaText}>{app.category || 'Other'}</Text>
+                      <Text style={styles.metaText}>
+                        Pickups: {app.pickups || 0}
+                      </Text>
+                      <Text style={styles.metaText}>
+                        Unlocks: {app.unlocks || 0}
+                      </Text>
+                      <Text style={styles.metaText}>
+                        {app.category || 'Other'}
+                      </Text>
                     </View>
 
                     {limitMinutes > 0 ? (
@@ -535,8 +783,7 @@ export default function UsageMonitoringScreen() {
                                 : isNearLimit
                                 ? styles.limitStatusWarning
                                 : styles.limitStatusSafe,
-                            ]}
-                          >
+                            ]}>
                             {isOverLimit
                               ? 'Over limit'
                               : isNearLimit
@@ -549,7 +796,7 @@ export default function UsageMonitoringScreen() {
                           <View
                             style={[
                               styles.progressBarFill,
-                              { width: `${progress}%` },
+                              {width: `${progress}%`},
                               isOverLimit
                                 ? styles.progressBarDanger
                                 : isNearLimit
@@ -560,7 +807,8 @@ export default function UsageMonitoringScreen() {
                         </View>
 
                         <Text style={styles.progressText}>
-                          {app.minutesUsed}/{limitMinutes} minutes used ({progress}%)
+                          {app.minutesUsed}/{limitMinutes} minutes used (
+                          {progress}%)
                         </Text>
                       </>
                     ) : (
@@ -574,8 +822,7 @@ export default function UsageMonitoringScreen() {
                         style={styles.secondaryActionButton}
                         onPress={() => openLimitEditor(app)}
                         disabled={isSavingThisApp}
-                        activeOpacity={0.85}
-                      >
+                        activeOpacity={0.85}>
                         <Text style={styles.secondaryActionButtonText}>
                           {limitMinutes > 0 ? 'Edit Limit' : 'Set Limit'}
                         </Text>
@@ -586,8 +833,7 @@ export default function UsageMonitoringScreen() {
                           style={styles.secondaryDangerButton}
                           onPress={() => handleRemoveLimit(app)}
                           disabled={isSavingThisApp}
-                          activeOpacity={0.85}
-                        >
+                          activeOpacity={0.85}>
                           <Text style={styles.secondaryDangerButtonText}>
                             Remove
                           </Text>
@@ -601,19 +847,18 @@ export default function UsageMonitoringScreen() {
                           Set daily limit for {app.appName}
                         </Text>
                         <Text style={styles.editorHint}>
-                          Keep it simple. Save a daily minute limit and the app will
-                          refresh feedback immediately.
+                          Keep it simple. Save a daily minute limit and the app
+                          will refresh feedback immediately.
                         </Text>
 
                         <View style={styles.quickLimitRow}>
-                          {QUICK_LIMIT_OPTIONS.map((minutes) => (
+                          {QUICK_LIMIT_OPTIONS.map(minutes => (
                             <TouchableOpacity
                               key={`${app.packageName}_${minutes}`}
                               style={styles.quickLimitChip}
                               onPress={() => handleQuickLimit(app, minutes)}
                               disabled={isSavingThisApp}
-                              activeOpacity={0.85}
-                            >
+                              activeOpacity={0.85}>
                               <Text style={styles.quickLimitChipText}>
                                 {minutes}m
                               </Text>
@@ -624,7 +869,7 @@ export default function UsageMonitoringScreen() {
                         <TextInput
                           style={styles.limitInput}
                           value={limitInputValue}
-                          onChangeText={(value) =>
+                          onChangeText={value =>
                             setLimitInputValue(normalizeLimitInput(value))
                           }
                           keyboardType="numeric"
@@ -637,23 +882,23 @@ export default function UsageMonitoringScreen() {
                             style={styles.primaryEditorButton}
                             onPress={() => handleSaveCustomLimit(app)}
                             disabled={isSavingThisApp}
-                            activeOpacity={0.85}
-                          >
+                            activeOpacity={0.85}>
                             <Text style={styles.primaryEditorButtonText}>
                               {isSavingThisApp ? 'Saving...' : 'Save Limit'}
                             </Text>
                           </TouchableOpacity>
 
                           <TouchableOpacity
-                            style={styles.cancelEditorButton}
+                            style={styles.ghostEditorButton}
                             onPress={() => {
                               setExpandedEditorPackage('');
                               setLimitInputValue('');
                             }}
                             disabled={isSavingThisApp}
-                            activeOpacity={0.85}
-                          >
-                            <Text style={styles.cancelEditorButtonText}>Cancel</Text>
+                            activeOpacity={0.85}>
+                            <Text style={styles.ghostEditorButtonText}>
+                              Cancel
+                            </Text>
                           </TouchableOpacity>
                         </View>
                       </View>
@@ -672,233 +917,229 @@ export default function UsageMonitoringScreen() {
 const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: 16,
+    justifyContent: 'space-between',
+    marginBottom: 20,
   },
   headerTextWrap: {
     flex: 1,
     paddingRight: 12,
   },
   title: {
-    color: '#FFFFFF',
-    fontSize: 28,
+    fontSize: 22,
     fontWeight: '800',
+    color: '#F8FAFC',
+    marginBottom: 6,
   },
   subtitle: {
+    fontSize: 14,
+    lineHeight: 22,
     color: '#94A3B8',
-    marginTop: 8,
-    lineHeight: 20,
   },
   refreshButton: {
     backgroundColor: '#2563EB',
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: '#3B82F6',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 16,
   },
   refreshButtonText: {
     color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   loaderContainer: {
     paddingVertical: 48,
     alignItems: 'center',
-    justifyContent: 'center',
   },
   loaderText: {
-    color: '#94A3B8',
-    textAlign: 'center',
     marginTop: 12,
+    color: '#CBD5E1',
+    fontSize: 14,
   },
   permissionCard: {
-    backgroundColor: '#172554',
-    borderRadius: 18,
-    padding: 16,
+    backgroundColor: '#111827',
+    borderColor: '#334155',
     borderWidth: 1,
-    borderColor: '#2563EB',
-    marginBottom: 14,
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 16,
   },
   permissionTitle: {
-    color: '#BFDBFE',
-    fontSize: 16,
-    fontWeight: '800',
+    color: '#F8FAFC',
+    fontSize: 18,
+    fontWeight: '700',
     marginBottom: 8,
   },
   permissionText: {
-    color: '#DBEAFE',
-    lineHeight: 20,
-    marginBottom: 12,
+    color: '#CBD5E1',
+    lineHeight: 22,
+    marginBottom: 14,
   },
   permissionButton: {
+    alignSelf: 'flex-start',
     backgroundColor: '#2563EB',
-    borderRadius: 12,
+    borderRadius: 14,
+    paddingHorizontal: 16,
     paddingVertical: 12,
-    paddingHorizontal: 14,
-    alignItems: 'center',
   },
   permissionButtonText: {
     color: '#FFFFFF',
-    fontWeight: '800',
+    fontWeight: '700',
   },
   errorCard: {
-    backgroundColor: '#3F1D24',
+    backgroundColor: '#3F1D2E',
+    borderColor: '#7F1D1D',
+    borderWidth: 1,
     borderRadius: 18,
     padding: 16,
-    borderWidth: 1,
-    borderColor: '#7F1D1D',
-    marginBottom: 14,
+    marginBottom: 16,
   },
   errorTitle: {
     color: '#FCA5A5',
-    fontSize: 15,
-    fontWeight: '800',
+    fontSize: 16,
+    fontWeight: '700',
     marginBottom: 6,
   },
   errorText: {
     color: '#FECACA',
-    lineHeight: 20,
+    lineHeight: 22,
   },
   summaryGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginBottom: 2,
+    marginHorizontal: -6,
+    marginBottom: 16,
   },
   summaryCard: {
     width: '48%',
-    backgroundColor: '#111827',
-    borderRadius: 18,
-    padding: 14,
-    marginBottom: 12,
+    backgroundColor: '#141633',
+    borderColor: '#2A315D',
     borderWidth: 1,
-    borderColor: '#1F2937',
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 12,
+    marginHorizontal: '1%',
   },
-  summaryCardLeft: {
-    marginRight: '4%',
-  },
+  summaryCardLeft: {},
   summaryLabel: {
     color: '#94A3B8',
-    fontSize: 12,
+    fontSize: 14,
     marginBottom: 8,
   },
   summaryValue: {
-    color: '#FFFFFF',
+    color: '#F8FAFC',
     fontSize: 20,
     fontWeight: '800',
   },
   statusCard: {
-    backgroundColor: '#111827',
-    borderRadius: 18,
-    padding: 16,
+    backgroundColor: '#141633',
+    borderColor: '#2A315D',
     borderWidth: 1,
-    borderColor: '#1F2937',
-    marginBottom: 16,
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 18,
   },
   statusTitle: {
-    color: '#FFFFFF',
-    fontSize: 18,
+    color: '#F8FAFC',
+    fontSize: 16,
     fontWeight: '800',
     marginBottom: 8,
   },
   statusText: {
     color: '#CBD5E1',
-    marginBottom: 6,
+    marginBottom: 8,
   },
   statusHint: {
     color: '#94A3B8',
-    lineHeight: 20,
+    lineHeight: 22,
   },
   warningSection: {
-    marginBottom: 16,
+    marginBottom: 18,
   },
   sectionTitle: {
-    color: '#FFFFFF',
-    fontSize: 18,
+    color: '#F8FAFC',
+    fontSize: 16,
     fontWeight: '800',
     marginBottom: 12,
   },
   warningCard: {
     borderRadius: 18,
-    padding: 14,
-    marginBottom: 10,
-    borderWidth: 1,
+    padding: 16,
+    marginBottom: 12,
   },
   warningCardDanger: {
-    backgroundColor: '#3F1D24',
+    backgroundColor: '#3F1D2E',
     borderColor: '#7F1D1D',
+    borderWidth: 1,
   },
   warningCardSoft: {
-    backgroundColor: '#3A2A12',
-    borderColor: '#92400E',
+    backgroundColor: '#2A203E',
+    borderColor: '#6D28D9',
+    borderWidth: 1,
   },
   warningTitle: {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: '800',
-    textTransform: 'uppercase',
     marginBottom: 6,
   },
   warningTitleDanger: {
     color: '#FCA5A5',
   },
   warningTitleWarning: {
-    color: '#FCD34D',
+    color: '#C4B5FD',
   },
   warningAppName: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '800',
+    color: '#F8FAFC',
+    fontSize: 15,
+    fontWeight: '700',
     marginBottom: 6,
   },
   warningText: {
-    color: '#CBD5E1',
-    lineHeight: 20,
+    color: '#E2E8F0',
+    lineHeight: 22,
   },
   appsSection: {
-    marginTop: 2,
+    marginBottom: 24,
   },
   emptyCard: {
-    backgroundColor: '#111827',
-    borderRadius: 18,
-    padding: 16,
+    backgroundColor: '#141633',
+    borderColor: '#2A315D',
     borderWidth: 1,
-    borderColor: '#1F2937',
+    borderRadius: 20,
+    padding: 18,
   },
   emptyText: {
-    color: '#94A3B8',
-    textAlign: 'center',
+    color: '#CBD5E1',
   },
   appCard: {
-    backgroundColor: '#111827',
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 12,
+    backgroundColor: '#141633',
+    borderColor: '#2A315D',
     borderWidth: 1,
-    borderColor: '#1F2937',
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 14,
   },
   appTopRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: 8,
+    marginBottom: 10,
   },
   appTitleWrap: {
     flex: 1,
     paddingRight: 12,
   },
   appName: {
-    color: '#FFFFFF',
+    color: '#F8FAFC',
     fontSize: 16,
     fontWeight: '800',
     marginBottom: 4,
   },
   appPackage: {
     color: '#64748B',
-    fontSize: 12,
+    fontSize: 13,
   },
   appMinutes: {
-    color: '#A78BFA',
+    color: '#C4B5FD',
     fontSize: 16,
     fontWeight: '800',
   },
@@ -909,134 +1150,132 @@ const styles = StyleSheet.create({
   },
   metaText: {
     color: '#94A3B8',
-    fontSize: 12,
-    marginRight: 12,
-    marginBottom: 4,
+    marginRight: 14,
+    marginBottom: 6,
+    fontSize: 13,
   },
   limitRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 8,
+    alignItems: 'center',
   },
   limitText: {
-    color: '#CBD5E1',
-    fontSize: 13,
+    color: '#E2E8F0',
     fontWeight: '600',
   },
   limitStatus: {
-    fontSize: 12,
     fontWeight: '800',
   },
-  limitStatusDanger: {
-    color: '#FCA5A5',
+  limitStatusSafe: {
+    color: '#22C55E',
   },
   limitStatusWarning: {
-    color: '#FCD34D',
+    color: '#F59E0B',
   },
-  limitStatusSafe: {
-    color: '#86EFAC',
+  limitStatusDanger: {
+    color: '#F87171',
   },
   progressBarBackground: {
     height: 10,
+    backgroundColor: '#0F172A',
     borderRadius: 999,
-    backgroundColor: '#1F2937',
     overflow: 'hidden',
     marginBottom: 8,
   },
   progressBarFill: {
-    height: '100%',
+    height: 10,
     borderRadius: 999,
-  },
-  progressBarDanger: {
-    backgroundColor: '#EF4444',
-  },
-  progressBarWarning: {
-    backgroundColor: '#F59E0B',
   },
   progressBarSafe: {
     backgroundColor: '#22C55E',
   },
+  progressBarWarning: {
+    backgroundColor: '#F59E0B',
+  },
+  progressBarDanger: {
+    backgroundColor: '#EF4444',
+  },
   progressText: {
     color: '#94A3B8',
-    fontSize: 12,
+    fontSize: 13,
+    marginBottom: 12,
   },
   noLimitText: {
-    color: '#64748B',
-    fontSize: 12,
+    color: '#94A3B8',
     fontStyle: 'italic',
+    marginBottom: 12,
   },
   actionRow: {
     flexDirection: 'row',
-    marginTop: 14,
+    marginTop: 2,
   },
   secondaryActionButton: {
-    backgroundColor: '#1D4ED8',
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+    borderRadius: 14,
     marginRight: 10,
   },
   secondaryActionButtonText: {
     color: '#FFFFFF',
-    fontWeight: '800',
-    fontSize: 13,
+    fontWeight: '700',
   },
   secondaryDangerButton: {
-    backgroundColor: '#3F1D24',
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    backgroundColor: '#2B1620',
     borderWidth: 1,
     borderColor: '#7F1D1D',
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+    borderRadius: 14,
   },
   secondaryDangerButtonText: {
     color: '#FCA5A5',
-    fontWeight: '800',
-    fontSize: 13,
+    fontWeight: '700',
   },
   editorCard: {
-    marginTop: 14,
-    borderRadius: 16,
-    padding: 14,
+    marginTop: 16,
     backgroundColor: '#0F172A',
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: '#1E293B',
+    borderColor: '#334155',
+    padding: 16,
   },
   editorTitle: {
-    color: '#FFFFFF',
+    color: '#F8FAFC',
     fontSize: 15,
     fontWeight: '800',
     marginBottom: 6,
   },
   editorHint: {
     color: '#94A3B8',
-    lineHeight: 19,
+    lineHeight: 20,
     marginBottom: 12,
   },
   quickLimitRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginBottom: 8,
+    marginBottom: 12,
   },
   quickLimitChip: {
-    backgroundColor: '#1E293B',
-    borderRadius: 999,
-    paddingVertical: 8,
+    backgroundColor: '#1D4ED8',
     paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
     marginRight: 8,
     marginBottom: 8,
   },
   quickLimitChipText: {
-    color: '#E2E8F0',
+    color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 12,
   },
   limitInput: {
-    backgroundColor: '#020617',
-    borderWidth: 1,
+    backgroundColor: '#111827',
     borderColor: '#334155',
-    borderRadius: 12,
-    color: '#FFFFFF',
+    borderWidth: 1,
+    borderRadius: 14,
+    color: '#F8FAFC',
     paddingHorizontal: 14,
     paddingVertical: 12,
     marginBottom: 12,
@@ -1046,22 +1285,22 @@ const styles = StyleSheet.create({
   },
   primaryEditorButton: {
     backgroundColor: '#2563EB',
-    borderRadius: 12,
-    paddingVertical: 11,
     paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 14,
     marginRight: 10,
   },
   primaryEditorButtonText: {
     color: '#FFFFFF',
     fontWeight: '800',
   },
-  cancelEditorButton: {
-    backgroundColor: '#1E293B',
-    borderRadius: 12,
-    paddingVertical: 11,
+  ghostEditorButton: {
+    backgroundColor: '#1F2937',
     paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 14,
   },
-  cancelEditorButtonText: {
+  ghostEditorButtonText: {
     color: '#CBD5E1',
     fontWeight: '700',
   },
