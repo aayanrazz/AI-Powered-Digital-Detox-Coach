@@ -1,8 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import notifee, {AndroidImportance} from '@notifee/react-native';
-import {APP_CONFIG} from '../config/appConfig';
-import type {AppLimit, UsageApp} from '../types';
-import {usageTracker} from '../native/usageTracker';
+import notifee, { AndroidImportance } from '@notifee/react-native';
+import { APP_CONFIG } from '../config/appConfig';
+import type { AppLimit, UsageApp } from '../types';
+import { usageTracker } from '../native/usageTracker';
 
 export type InterventionLevel = 'approaching_limit' | 'limit_reached';
 
@@ -30,6 +30,12 @@ export interface UsageRefreshAndCheckResult {
   triggeredWarnings: TriggeredWarning[];
 }
 
+type PrivacySyncState = {
+  consentGiven: boolean;
+  dataCollection: boolean;
+  allowServerSync: boolean;
+};
+
 const INTERVENTION_CHANNEL_ID = 'detox-interventions';
 const INTERVENTION_CHANNEL_NAME = 'Detox Interventions';
 const COOLDOWN_MINUTES = 30;
@@ -37,8 +43,10 @@ const COOLDOWN_MINUTES = 30;
 const REQUEST_TIMEOUT_MS = 12000;
 const HEADERS_CACHE_MS = 15000;
 const SYNC_COOLDOWN_MS = 15000;
+const PRIVACY_CACHE_MS = 15000;
 
-let cachedHeaders: {value: Record<string, string>; at: number} | null = null;
+let cachedHeaders: { value: Record<string, string>; at: number } | null = null;
+let cachedPrivacyState: { value: PrivacySyncState; at: number } | null = null;
 let inFlightRefreshPromise: Promise<UsageRefreshAndCheckResult> | null = null;
 let notificationChannelPromise: Promise<string> | null = null;
 let notificationPermissionPromise: Promise<unknown> | null = null;
@@ -84,7 +92,7 @@ async function getAuthHeaders() {
 
   const headers = {
     'Content-Type': 'application/json',
-    ...(token ? {Authorization: `Bearer ${token}`} : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 
   cachedHeaders = {
@@ -326,10 +334,65 @@ function buildUsageSignature(apps: UsageApp[]) {
     .join('|');
 }
 
+async function getPrivacySyncState(): Promise<PrivacySyncState> {
+  const now = Date.now();
+
+  if (cachedPrivacyState && now - cachedPrivacyState.at < PRIVACY_CACHE_MS) {
+    return cachedPrivacyState.value;
+  }
+
+  const headers = await getAuthHeaders();
+
+  const response = await withTimeout(
+    fetch(buildUrl('/privacy/policy'), {
+      method: 'GET',
+      headers,
+    }),
+    REQUEST_TIMEOUT_MS,
+    'Fetching privacy settings timed out.',
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch privacy settings. ${response.status}`);
+  }
+
+  const json = await response.json();
+  const currentPrivacySettings = json?.policy?.currentPrivacySettings || {};
+
+  const value: PrivacySyncState = {
+    consentGiven: Boolean(currentPrivacySettings?.consentGiven),
+    dataCollection: Boolean(currentPrivacySettings?.dataCollection),
+    allowServerSync:
+      Boolean(currentPrivacySettings?.consentGiven) &&
+      Boolean(currentPrivacySettings?.dataCollection),
+  };
+
+  cachedPrivacyState = {
+    value,
+    at: now,
+  };
+
+  return value;
+}
+
+async function isServerUsageSyncAllowed(): Promise<boolean> {
+  try {
+    const privacy = await getPrivacySyncState();
+    return privacy.allowServerSync;
+  } catch {
+    return false;
+  }
+}
+
 async function syncUsageToBackend(apps: UsageApp[]) {
   const mergedApps = mergeAppsByPackage(apps);
 
   if (!mergedApps.length) {
+    return;
+  }
+
+  const allowServerSync = await isServerUsageSyncAllowed();
+  if (!allowServerSync) {
     return;
   }
 

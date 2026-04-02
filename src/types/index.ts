@@ -1,5 +1,7 @@
 export type ThemeMode = 'dark' | 'light' | 'system';
 
+export type RiskLevel = 'low' | 'medium' | 'high';
+
 export interface BadgeItem {
   key: string;
   label: string;
@@ -274,6 +276,87 @@ export interface RewardsSummary {
   nextBadgeHint?: NextBadgeHint | null;
 }
 
+export interface PrivacySettingsData {
+  dataCollection?: boolean;
+  anonymizeData?: boolean;
+  allowAnalyticsForTraining?: boolean;
+  retentionDays?: number;
+  consentGiven?: boolean;
+  consentVersion?: string;
+  consentedAt?: string | null;
+  policyLastViewedAt?: string | null;
+  deletionRequestedAt?: string | null;
+}
+
+export interface PrivacyPolicySection {
+  title: string;
+  items: string[];
+}
+
+export interface PrivacyPolicyData {
+  version: string;
+  updatedAt: string;
+  summary: string[];
+  sections: PrivacyPolicySection[];
+  retentionOptions: number[];
+  securityPractices: string[];
+  currentPrivacySettings: PrivacySettingsData;
+}
+
+export interface UsageSyncPrivacyState {
+  settingsFound?: boolean;
+  consentGiven?: boolean;
+  dataCollection?: boolean;
+  anonymizeData?: boolean;
+  allowAnalyticsForTraining?: boolean;
+  retentionDays?: number;
+  allowServerSync?: boolean;
+}
+
+export interface IngestUsageAnalysis {
+  score?: number;
+  riskLevel?: string;
+  predictionSource?: string;
+  mlConfidence?: number;
+  fallbackUsed?: boolean;
+  totalScreenMinutes?: number;
+  overLimitMinutes?: number;
+}
+
+export interface IngestUsageNotificationMeta {
+  dominantNotificationType?: string;
+  predictionSource?: string;
+  fallbackUsed?: boolean;
+  confidence?: number;
+  safeguardApplied?: boolean;
+  sendLimitWarning?: boolean;
+  sendSleepNudge?: boolean;
+  classProbabilities?: Record<string, number>;
+  errorMessage?: string;
+  createdNotifications?: Array<{
+    id?: string;
+    title?: string;
+    kind?: string;
+    skippedDuplicate?: boolean;
+  }>;
+}
+
+export interface IngestUsageResult {
+  success: boolean;
+  message: string;
+  syncedCount: number;
+  skippedDueToPrivacy?: boolean;
+  dayKey?: string | null;
+  privacy?: UsageSyncPrivacyState;
+  analysis?: IngestUsageAnalysis;
+  notificationMeta?: IngestUsageNotificationMeta;
+  appLimitSummary?: {
+    monitoredApps: AppLimitStatusItem[];
+    exceededApps: AppLimitStatusItem[];
+    exceededCount: number;
+  };
+}
+
 export interface SettingsData {
   notificationsEnabled?: boolean;
   aiInterventionsEnabled?: boolean;
@@ -290,6 +373,13 @@ export interface SettingsData {
 
   dataCollection?: boolean;
   anonymizeData?: boolean;
+  allowAnalyticsForTraining?: boolean;
+  retentionDays?: number;
+  consentGiven?: boolean;
+  consentVersion?: string;
+  consentedAt?: string | null;
+  policyLastViewedAt?: string | null;
+  deletionRequestedAt?: string | null;
 
   googleFitConnected?: boolean;
   appleHealthConnected?: boolean;

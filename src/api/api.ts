@@ -89,11 +89,48 @@ type PrivacyPolicyPayload = {
   currentPrivacySettings: PrivacySettingsPayload;
 };
 
+type UsageIngestSyncMeta = {
+  sessionsReceived?: number;
+  sessionsNormalized?: number;
+  dayKey?: string | null;
+  skippedDueToPrivacy?: boolean;
+  privacy?: {
+    settingsFound?: boolean;
+    consentGiven?: boolean;
+    dataCollection?: boolean;
+    anonymizeData?: boolean;
+    allowAnalyticsForTraining?: boolean;
+    retentionDays?: number;
+    allowServerSync?: boolean;
+  };
+};
+
+type UsageIngestApiResponse = {
+  success: boolean;
+  message: string;
+  syncedCount?: number;
+  syncMeta?: UsageIngestSyncMeta;
+  analysis?: any;
+  notificationMeta?: any;
+  topApps?: any[];
+  appLimitSummary?: {
+    monitoredApps?: any[];
+    exceededApps?: any[];
+    exceededCount?: number;
+    topExceededApp?: any;
+  };
+};
+
 const deriveRiskLevel = (score?: number | null): RiskLevel => {
   if (score === undefined || score === null) return 'low';
   if (score < 45) return 'high';
   if (score < 70) return 'medium';
   return 'low';
+};
+
+const toSafeNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 };
 
 const guessCategory = (app: UsageApp): string => {
@@ -572,27 +609,28 @@ export const api = {
     }),
 
   ingestUsage: async (payload: { apps: UsageApp[] }) => {
-    const res = await http<{
-      success: boolean;
-      message: string;
-      syncedCount: number;
-      analysis?: any;
-      topApps?: any[];
-      appLimitSummary?: {
-        monitoredApps?: any[];
-        exceededApps?: any[];
-        exceededCount?: number;
-        topExceededApp?: any;
-      };
-    }>('/usage/ingest', {
+    const res = await http<UsageIngestApiResponse>('/usage/ingest', {
       method: 'POST',
       body: { sessions: mapUsageAppsToSessions(payload.apps) },
     });
 
+    const skippedDueToPrivacy = Boolean(res.syncMeta?.skippedDueToPrivacy);
+    const syncedCount = skippedDueToPrivacy
+      ? 0
+      : toSafeNumber(
+          res.syncMeta?.sessionsNormalized ?? res.syncedCount,
+          0
+        );
+
     return {
       success: Boolean(res.success),
       message: res.message ?? '',
-      syncedCount: Number(res.syncedCount ?? 0),
+      syncedCount,
+      skippedDueToPrivacy,
+      dayKey: res.syncMeta?.dayKey ?? null,
+      privacy: res.syncMeta?.privacy,
+      analysis: res.analysis,
+      notificationMeta: res.notificationMeta,
       appLimitSummary: {
         monitoredApps: mapLimitStatusFromBackend(
           res.appLimitSummary?.monitoredApps || []

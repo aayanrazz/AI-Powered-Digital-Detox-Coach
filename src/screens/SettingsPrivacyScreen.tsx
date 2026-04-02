@@ -12,7 +12,7 @@ import {
 import Screen from '../components/Screen';
 import PrimaryButton from '../components/PrimaryButton';
 import { api } from '../api/api';
-import { SettingsData, ThemeMode } from '../types';
+import { PrivacyPolicyData, SettingsData, ThemeMode } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
 import { syncDetoxNotifications } from '../services/notificationSyncService';
@@ -25,39 +25,14 @@ const FOCUS_OPTIONS = [
   'Streaming',
   'Study',
   'Sleep',
-];
+] as const;
 
 type RetentionOption = 7 | 30 | 90 | 180 | 365;
-
-type PolicySection = {
-  title: string;
-  items: string[];
-};
-
-type PrivacyPolicyData = {
-  version: string;
-  updatedAt: string;
-  summary: string[];
-  sections: PolicySection[];
-  retentionOptions: number[];
-  securityPractices: string[];
-  currentPrivacySettings: {
-    dataCollection: boolean;
-    anonymizeData: boolean;
-    allowAnalyticsForTraining: boolean;
-    retentionDays: number;
-    consentGiven: boolean;
-    consentVersion: string;
-    consentedAt: string | null;
-    policyLastViewedAt: string | null;
-    deletionRequestedAt: string | null;
-  };
-};
 
 function parseFocusAreas(input: string) {
   return input
     .split(',')
-    .map((item) => item.trim())
+    .map(item => item.trim())
     .filter(Boolean);
 }
 
@@ -75,14 +50,31 @@ function normalizeTime(value: string | undefined, fallback: string) {
 
 function formatDateTime(value?: string | null) {
   if (!value) return 'Not set';
-  return new Date(value).toLocaleString();
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return 'Not set';
+  }
+
+  return parsed.toLocaleString();
+}
+
+function sanitizeRetentionDays(value: number | undefined): RetentionOption {
+  const allowed: RetentionOption[] = [7, 30, 90, 180, 365];
+  const parsed = Number(value);
+
+  if (allowed.includes(parsed as RetentionOption)) {
+    return parsed as RetentionOption;
+  }
+
+  return 30;
 }
 
 function createDefaultSettings(): SettingsData {
   return {
     notificationsEnabled: true,
     aiInterventionsEnabled: true,
-    privacyModeEnabled: false,
+    privacyModeEnabled: true,
     dailyLimitMinutes: 180,
     blockDistractingApps: false,
     focusAreas: ['Social Media', 'Productivity'],
@@ -92,6 +84,13 @@ function createDefaultSettings(): SettingsData {
     limitWarnings: true,
     dataCollection: false,
     anonymizeData: true,
+    allowAnalyticsForTraining: false,
+    retentionDays: 30,
+    consentGiven: false,
+    consentVersion: 'v1.0',
+    consentedAt: null,
+    policyLastViewedAt: null,
+    deletionRequestedAt: null,
     googleFitConnected: false,
     appleHealthConnected: false,
     theme: 'dark',
@@ -148,22 +147,51 @@ export default function SettingsPrivacyScreen() {
       ]);
 
       const nextPolicy = policyRes?.policy || createDefaultPolicy();
+      const currentPrivacy = nextPolicy.currentPrivacySettings || {};
 
       const mergedSettings: SettingsData = {
         ...createDefaultSettings(),
         ...settingsRes?.settings,
         dataCollection:
-          nextPolicy.currentPrivacySettings?.dataCollection ??
+          currentPrivacy.dataCollection ??
           settingsRes?.settings?.dataCollection ??
           false,
         anonymizeData:
-          nextPolicy.currentPrivacySettings?.anonymizeData ??
+          currentPrivacy.anonymizeData ??
           settingsRes?.settings?.anonymizeData ??
           true,
         privacyModeEnabled:
-          nextPolicy.currentPrivacySettings?.anonymizeData ??
+          currentPrivacy.anonymizeData ??
           settingsRes?.settings?.privacyModeEnabled ??
           true,
+        allowAnalyticsForTraining:
+          currentPrivacy.allowAnalyticsForTraining ??
+          settingsRes?.settings?.allowAnalyticsForTraining ??
+          false,
+        retentionDays:
+          currentPrivacy.retentionDays ??
+          settingsRes?.settings?.retentionDays ??
+          30,
+        consentGiven:
+          currentPrivacy.consentGiven ??
+          settingsRes?.settings?.consentGiven ??
+          false,
+        consentVersion:
+          currentPrivacy.consentVersion ??
+          settingsRes?.settings?.consentVersion ??
+          nextPolicy.version,
+        consentedAt:
+          currentPrivacy.consentedAt ??
+          settingsRes?.settings?.consentedAt ??
+          null,
+        policyLastViewedAt:
+          currentPrivacy.policyLastViewedAt ??
+          settingsRes?.settings?.policyLastViewedAt ??
+          null,
+        deletionRequestedAt:
+          currentPrivacy.deletionRequestedAt ??
+          settingsRes?.settings?.deletionRequestedAt ??
+          null,
         focusAreas:
           Array.isArray(settingsRes?.settings?.focusAreas) &&
           settingsRes.settings.focusAreas.length
@@ -179,24 +207,19 @@ export default function SettingsPrivacyScreen() {
 
       const focusAreas = mergedSettings.focusAreas || [];
       setSelectedFocusAreas(
-        focusAreas.filter((item) => FOCUS_OPTIONS.includes(item))
+        focusAreas.filter(item => FOCUS_OPTIONS.includes(item as (typeof FOCUS_OPTIONS)[number]))
       );
       setCustomFocusAreas(
-        focusAreas.filter((item) => !FOCUS_OPTIONS.includes(item)).join(', ')
+        focusAreas.filter(item => !FOCUS_OPTIONS.includes(item as (typeof FOCUS_OPTIONS)[number])).join(', ')
       );
 
-      setConsentGiven(Boolean(nextPolicy.currentPrivacySettings?.consentGiven));
-      setAllowAnalyticsForTraining(
-        Boolean(nextPolicy.currentPrivacySettings?.allowAnalyticsForTraining)
-      );
-      setRetentionDays(
-        (Number(nextPolicy.currentPrivacySettings?.retentionDays || 30) ||
-          30) as RetentionOption
-      );
+      setConsentGiven(Boolean(currentPrivacy.consentGiven));
+      setAllowAnalyticsForTraining(Boolean(currentPrivacy.allowAnalyticsForTraining));
+      setRetentionDays(sanitizeRetentionDays(currentPrivacy.retentionDays));
     } catch (error: any) {
       Alert.alert(
         'Settings error',
-        error.message || 'Failed to load settings and privacy information'
+        error?.message || 'Failed to load settings and privacy information'
       );
     } finally {
       setRefreshing(false);
@@ -216,49 +239,87 @@ export default function SettingsPrivacyScreen() {
 
   const privacySummaryText = useMemo(() => {
     if (!consentGiven) {
-      return 'Consent not given. Data collection and anonymized training use will stay disabled.';
+      return 'Consent not given. Server-side usage sync, data collection, and anonymized training use stay disabled.';
     }
 
     return `Consent active • Retention ${retentionDays} days • Collection ${
       settings.dataCollection ? 'On' : 'Off'
-    } • Anonymization ${settings.anonymizeData ? 'On' : 'Off'}`;
-  }, [consentGiven, retentionDays, settings.anonymizeData, settings.dataCollection]);
+    } • Anonymization ${settings.anonymizeData ? 'On' : 'Off'} • Training ${
+      allowAnalyticsForTraining ? 'On' : 'Off'
+    }`;
+  }, [
+    allowAnalyticsForTraining,
+    consentGiven,
+    retentionDays,
+    settings.anonymizeData,
+    settings.dataCollection,
+  ]);
 
   const toggleFocusArea = (item: string) => {
-    setSelectedFocusAreas((prev) =>
-      prev.includes(item) ? prev.filter((x) => x !== item) : [...prev, item]
+    setSelectedFocusAreas(prev =>
+      prev.includes(item) ? prev.filter(x => x !== item) : [...prev, item]
     );
+  };
+
+  const toggleConsent = () => {
+    setConsentGiven(prev => {
+      const next = !prev;
+
+      if (!next) {
+        setSettings(current => ({
+          ...current,
+          dataCollection: false,
+        }));
+        setAllowAnalyticsForTraining(false);
+      }
+
+      return next;
+    });
   };
 
   const save = async () => {
     try {
       setSaving(true);
 
+      const safeDailyLimit = Math.max(
+        60,
+        Math.min(1440, Number(settings.dailyLimitMinutes || 180))
+      );
+
+      const normalizedConsent = Boolean(consentGiven);
+      const normalizedDataCollection = normalizedConsent
+        ? Boolean(settings.dataCollection)
+        : false;
+      const normalizedAnonymizeData = Boolean(settings.anonymizeData);
+      const normalizedTraining = normalizedConsent
+        ? Boolean(allowAnalyticsForTraining)
+        : false;
+      const normalizedRetentionDays = sanitizeRetentionDays(retentionDays);
+
       const payload: SettingsData = {
         ...settings,
-        dailyLimitMinutes: Math.max(
-          60,
-          Math.min(1440, Number(settings.dailyLimitMinutes || 180))
-        ),
+        dailyLimitMinutes: safeDailyLimit,
         focusAreas: finalFocusAreas,
         bedTime: normalizeTime(settings.bedTime, '23:00'),
         wakeTime: normalizeTime(settings.wakeTime, '07:00'),
-        dataCollection: consentGiven ? !!settings.dataCollection : false,
-        anonymizeData: !!settings.anonymizeData,
-        privacyModeEnabled: !!settings.anonymizeData,
+        dataCollection: normalizedDataCollection,
+        anonymizeData: normalizedAnonymizeData,
+        privacyModeEnabled: normalizedAnonymizeData,
+        allowAnalyticsForTraining: normalizedTraining,
+        retentionDays: normalizedRetentionDays,
+        consentGiven: normalizedConsent,
+        consentVersion: policy.version || 'v1.0',
         appLimits: Array.isArray(settings.appLimits) ? settings.appLimits : [],
       };
 
       await api.updateSettings(payload);
 
       await api.savePrivacyConsent({
-        consentGiven,
-        dataCollection: consentGiven ? !!payload.dataCollection : false,
-        anonymizeData: !!payload.anonymizeData,
-        allowAnalyticsForTraining: consentGiven
-          ? allowAnalyticsForTraining
-          : false,
-        retentionDays,
+        consentGiven: normalizedConsent,
+        dataCollection: normalizedDataCollection,
+        anonymizeData: normalizedAnonymizeData,
+        allowAnalyticsForTraining: normalizedTraining,
+        retentionDays: normalizedRetentionDays,
       });
 
       await syncDetoxNotifications();
@@ -271,7 +332,7 @@ export default function SettingsPrivacyScreen() {
 
       await load();
     } catch (error: any) {
-      Alert.alert('Save failed', error.message || 'Could not save settings');
+      Alert.alert('Save failed', error?.message || 'Could not save settings');
     } finally {
       setSaving(false);
     }
@@ -295,7 +356,7 @@ export default function SettingsPrivacyScreen() {
             } catch (error: any) {
               Alert.alert(
                 'Delete failed',
-                error.message || 'Could not delete your stored data'
+                error?.message || 'Could not delete your stored data'
               );
             } finally {
               setDeleting(false);
@@ -305,6 +366,18 @@ export default function SettingsPrivacyScreen() {
       ]
     );
   }, [load]);
+
+  const retentionOptions = useMemo(() => {
+    const fromPolicy = Array.isArray(policy.retentionOptions)
+      ? policy.retentionOptions
+      : [7, 30, 90, 180, 365];
+
+    const normalized = fromPolicy.filter(
+      item => item === 7 || item === 30 || item === 90 || item === 180 || item === 365
+    ) as RetentionOption[];
+
+    return normalized.length ? normalized : [7, 30, 90, 180, 365];
+  }, [policy.retentionOptions]);
 
   return (
     <Screen
@@ -328,29 +401,29 @@ export default function SettingsPrivacyScreen() {
         <RowSwitch
           label="Daily summaries"
           value={!!settings.notificationsEnabled}
-          onValueChange={(value) =>
-            setSettings((prev) => ({ ...prev, notificationsEnabled: value }))
+          onValueChange={value =>
+            setSettings(prev => ({ ...prev, notificationsEnabled: value }))
           }
         />
         <RowSwitch
           label="AI interventions"
           value={!!settings.aiInterventionsEnabled}
-          onValueChange={(value) =>
-            setSettings((prev) => ({ ...prev, aiInterventionsEnabled: value }))
+          onValueChange={value =>
+            setSettings(prev => ({ ...prev, aiInterventionsEnabled: value }))
           }
         />
         <RowSwitch
           label="Achievement alerts"
           value={!!settings.achievementAlerts}
-          onValueChange={(value) =>
-            setSettings((prev) => ({ ...prev, achievementAlerts: value }))
+          onValueChange={value =>
+            setSettings(prev => ({ ...prev, achievementAlerts: value }))
           }
         />
         <RowSwitch
           label="Limit warnings"
           value={!!settings.limitWarnings}
-          onValueChange={(value) =>
-            setSettings((prev) => ({ ...prev, limitWarnings: value }))
+          onValueChange={value =>
+            setSettings(prev => ({ ...prev, limitWarnings: value }))
           }
         />
       </View>
@@ -367,11 +440,11 @@ export default function SettingsPrivacyScreen() {
         <Text style={styles.meta}>
           Last policy view: {formatDateTime(policy.currentPrivacySettings?.policyLastViewedAt)}
         </Text>
+        <Text style={styles.meta}>
+          Last data deletion request: {formatDateTime(policy.currentPrivacySettings?.deletionRequestedAt)}
+        </Text>
 
-        <Pressable
-          style={styles.consentRow}
-          onPress={() => setConsentGiven((prev) => !prev)}
-        >
+        <Pressable style={styles.consentRow} onPress={toggleConsent}>
           <View style={[styles.checkbox, consentGiven && styles.checkboxChecked]}>
             {consentGiven ? <Text style={styles.checkboxTick}>✓</Text> : null}
           </View>
@@ -385,15 +458,15 @@ export default function SettingsPrivacyScreen() {
           label="Allow data collection"
           value={!!settings.dataCollection}
           disabled={!consentGiven}
-          onValueChange={(value) =>
-            setSettings((prev) => ({ ...prev, dataCollection: value }))
+          onValueChange={value =>
+            setSettings(prev => ({ ...prev, dataCollection: value }))
           }
         />
         <RowSwitch
           label="Anonymize data"
           value={!!settings.anonymizeData}
-          onValueChange={(value) =>
-            setSettings((prev) => ({
+          onValueChange={value =>
+            setSettings(prev => ({
               ...prev,
               anonymizeData: value,
               privacyModeEnabled: value,
@@ -404,19 +477,19 @@ export default function SettingsPrivacyScreen() {
           label="Allow anonymized dataset training"
           value={!!allowAnalyticsForTraining}
           disabled={!consentGiven}
-          onValueChange={setAllowAnalyticsForTraining}
+          onValueChange={value => setAllowAnalyticsForTraining(value)}
         />
 
         <Text style={styles.label}>Retention Period</Text>
         <View style={styles.chipRow}>
-          {(policy.retentionOptions || [7, 30, 90, 180, 365]).map((item) => {
+          {retentionOptions.map(item => {
             const active = retentionDays === item;
 
             return (
               <Pressable
                 key={String(item)}
                 style={[styles.chip, active && styles.chipActive]}
-                onPress={() => setRetentionDays(item as RetentionOption)}
+                onPress={() => setRetentionDays(item)}
               >
                 <Text style={[styles.chipText, active && styles.chipTextActive]}>
                   {item} days
@@ -431,11 +504,17 @@ export default function SettingsPrivacyScreen() {
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Privacy Policy Summary</Text>
-        {(policy.summary || []).map((item, index) => (
-          <Text key={`summary-${index}`} style={styles.bullet}>
-            • {item}
+        {(policy.summary || []).length ? (
+          (policy.summary || []).map((item, index) => (
+            <Text key={`summary-${index}`} style={styles.bullet}>
+              • {item}
+            </Text>
+          ))
+        ) : (
+          <Text style={styles.helper}>
+            Privacy summary will appear here when available from the backend policy.
           </Text>
-        ))}
+        )}
       </View>
 
       {(policy.sections || []).map((section, index) => (
@@ -451,11 +530,17 @@ export default function SettingsPrivacyScreen() {
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Security Practices</Text>
-        {(policy.securityPractices || []).map((item, index) => (
-          <Text key={`security-${index}`} style={styles.bullet}>
-            • {item}
+        {(policy.securityPractices || []).length ? (
+          (policy.securityPractices || []).map((item, index) => (
+            <Text key={`security-${index}`} style={styles.bullet}>
+              • {item}
+            </Text>
+          ))
+        ) : (
+          <Text style={styles.helper}>
+            Security practice details will appear here when provided by the backend.
           </Text>
-        ))}
+        )}
       </View>
 
       <View style={styles.card}>
@@ -465,8 +550,8 @@ export default function SettingsPrivacyScreen() {
         <TextInput
           style={styles.input}
           value={String(settings.dailyLimitMinutes ?? 180)}
-          onChangeText={(value) =>
-            setSettings((prev) => ({
+          onChangeText={value =>
+            setSettings(prev => ({
               ...prev,
               dailyLimitMinutes: Number(value || 0),
             }))
@@ -478,7 +563,7 @@ export default function SettingsPrivacyScreen() {
 
         <Text style={styles.label}>Focus Areas</Text>
         <View style={styles.chipRow}>
-          {FOCUS_OPTIONS.map((item) => {
+          {FOCUS_OPTIONS.map(item => {
             const active = selectedFocusAreas.includes(item);
 
             return (
@@ -511,8 +596,8 @@ export default function SettingsPrivacyScreen() {
         <TextInput
           style={styles.input}
           value={settings.bedTime || '23:00'}
-          onChangeText={(value) =>
-            setSettings((prev) => ({ ...prev, bedTime: value }))
+          onChangeText={value =>
+            setSettings(prev => ({ ...prev, bedTime: value }))
           }
           placeholder="23:00"
           placeholderTextColor="#64748B"
@@ -522,8 +607,8 @@ export default function SettingsPrivacyScreen() {
         <TextInput
           style={styles.input}
           value={settings.wakeTime || '07:00'}
-          onChangeText={(value) =>
-            setSettings((prev) => ({ ...prev, wakeTime: value }))
+          onChangeText={value =>
+            setSettings(prev => ({ ...prev, wakeTime: value }))
           }
           placeholder="07:00"
           placeholderTextColor="#64748B"
@@ -533,7 +618,7 @@ export default function SettingsPrivacyScreen() {
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Theme</Text>
         <View style={styles.themeRow}>
-          {(['dark', 'light', 'system'] as ThemeMode[]).map((item) => (
+          {(['dark', 'light', 'system'] as ThemeMode[]).map(item => (
             <Pressable
               key={item}
               style={[
@@ -541,7 +626,7 @@ export default function SettingsPrivacyScreen() {
                 settings.theme === item && styles.themeChipActive,
               ]}
               onPress={() =>
-                setSettings((prev) => ({
+                setSettings(prev => ({
                   ...prev,
                   theme: item,
                 }))
@@ -578,6 +663,10 @@ export default function SettingsPrivacyScreen() {
         <Text style={styles.previewText}>
           Consent: {consentGiven ? 'Given' : 'Not Given'} • Retention: {retentionDays} days
         </Text>
+        <Text style={styles.previewText}>
+          Data collection: {settings.dataCollection ? 'On' : 'Off'} • Training:{' '}
+          {allowAnalyticsForTraining ? 'On' : 'Off'}
+        </Text>
       </View>
 
       <PrimaryButton title="Save Settings" onPress={save} loading={saving} />
@@ -607,7 +696,9 @@ function RowSwitch({
 }) {
   return (
     <View style={styles.row}>
-      <Text style={[styles.rowText, disabled && styles.rowTextDisabled]}>{label}</Text>
+      <Text style={[styles.rowText, disabled && styles.rowTextDisabled]}>
+        {label}
+      </Text>
       <Switch value={value} onValueChange={onValueChange} disabled={disabled} />
     </View>
   );
@@ -688,6 +779,8 @@ const styles = StyleSheet.create({
   rowText: {
     color: '#E2E8F0',
     fontWeight: '600',
+    flex: 1,
+    paddingRight: 12,
   },
   rowTextDisabled: {
     color: '#64748B',
@@ -742,6 +835,7 @@ const styles = StyleSheet.create({
   },
   themeRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
   },
   themeChip: {
     paddingHorizontal: 14,
@@ -751,6 +845,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1E293B',
     marginRight: 10,
+    marginBottom: 8,
   },
   themeChipActive: {
     backgroundColor: '#4F46E5',
