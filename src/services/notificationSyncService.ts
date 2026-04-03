@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../api/api';
 import { NotificationItem, SettingsData } from '../types';
+import { isAuthSessionError } from '../utils/authSession';
 import {
   NOTIFICATION_CHANNELS,
   buildBackendDeviceNotificationId,
@@ -20,7 +21,9 @@ function normalizeTime(value: string | undefined, fallback: string) {
   const raw = String(value || '').trim();
   const match = raw.match(/^(\d{1,2}):(\d{2})$/);
 
-  if (!match) return fallback;
+  if (!match) {
+    return fallback;
+  }
 
   const hours = Math.max(0, Math.min(23, Number(match[1])));
   const minutes = Math.max(0, Math.min(59, Number(match[2])));
@@ -65,12 +68,14 @@ function createDefaultSettings(): SettingsData {
 async function getDeliveredBackendIds(): Promise<string[]> {
   const raw = await AsyncStorage.getItem(STORAGE_KEYS.DELIVERED_BACKEND_IDS);
 
-  if (!raw) return [];
+  if (!raw) {
+    return [];
+  }
 
   try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed)
-      ? parsed.map((item) => String(item)).filter(Boolean)
+      ? parsed.map(item => String(item)).filter(Boolean)
       : [];
   } catch {
     return [];
@@ -169,82 +174,93 @@ export async function applyNotificationSchedulesFromSettings(
 }
 
 export async function syncDetoxNotifications() {
-  const [settingsResponse, notificationsResponse] = await Promise.all([
-    api.getSettings(),
-    api.getNotifications(),
-  ]);
+  try {
+    const [settingsResponse, notificationsResponse] = await Promise.all([
+      api.getSettings(),
+      api.getNotifications(),
+    ]);
 
-  const settings: SettingsData = {
-    ...createDefaultSettings(),
-    ...(settingsResponse?.settings || {}),
-    focusAreas:
-      Array.isArray(settingsResponse?.settings?.focusAreas) &&
-      settingsResponse.settings.focusAreas.length
-        ? settingsResponse.settings.focusAreas
-        : ['Social Media', 'Productivity'],
-    appLimits: Array.isArray(settingsResponse?.settings?.appLimits)
-      ? settingsResponse.settings.appLimits
-      : [],
-  };
+    const settings: SettingsData = {
+      ...createDefaultSettings(),
+      ...(settingsResponse?.settings || {}),
+      focusAreas:
+        Array.isArray(settingsResponse?.settings?.focusAreas) &&
+        settingsResponse.settings.focusAreas.length
+          ? settingsResponse.settings.focusAreas
+          : ['Social Media', 'Productivity'],
+      appLimits: Array.isArray(settingsResponse?.settings?.appLimits)
+        ? settingsResponse.settings.appLimits
+        : [],
+    };
 
-  const notifications: NotificationItem[] = Array.isArray(
-    notificationsResponse?.notifications
-  )
-    ? notificationsResponse.notifications
-    : [];
+    const notifications: NotificationItem[] = Array.isArray(
+      notificationsResponse?.notifications
+    )
+      ? notificationsResponse.notifications
+      : [];
 
-  await applyNotificationSchedulesFromSettings(settings);
+    await applyNotificationSchedulesFromSettings(settings);
 
-  const deliveredIds = new Set(await getDeliveredBackendIds());
-  const unreadIds = new Set(
-    notifications
-      .filter((item) => item?._id && !item.read)
-      .map((item) => String(item._id))
-  );
+    const deliveredIds = new Set(await getDeliveredBackendIds());
+    const unreadIds = new Set(
+      notifications
+        .filter(item => item?._id && !item.read)
+        .map(item => String(item._id))
+    );
 
-  for (const deliveredId of Array.from(deliveredIds)) {
-    if (!unreadIds.has(deliveredId)) {
-      await cancelBackendNotification(deliveredId);
-      deliveredIds.delete(deliveredId);
+    for (const deliveredId of Array.from(deliveredIds)) {
+      if (!unreadIds.has(deliveredId)) {
+        await cancelBackendNotification(deliveredId);
+        deliveredIds.delete(deliveredId);
+      }
     }
+
+    for (const item of notifications) {
+      if (!item?._id || item.read) {
+        continue;
+      }
+
+      if (deliveredIds.has(item._id)) {
+        continue;
+      }
+
+      if (!shouldDeliverNotification(item, settings)) {
+        continue;
+      }
+
+      await displayLocalNotification({
+        id: buildBackendDeviceNotificationId(item._id),
+        backendNotificationId: item._id,
+        title: item.title,
+        body: item.message,
+        ctaAction: item.ctaAction,
+        ctaLabel: item.ctaLabel,
+        channelId: resolveChannelForNotification(item),
+        data: {
+          notificationType: item.type || 'system',
+        },
+      });
+
+      deliveredIds.add(item._id);
+    }
+
+    await setDeliveredBackendIds(Array.from(deliveredIds));
+  } catch (error) {
+    if (isAuthSessionError(error)) {
+      await resetDetoxNotificationSync();
+      return;
+    }
+
+    throw error;
   }
-
-  for (const item of notifications) {
-    if (!item?._id || item.read) {
-      continue;
-    }
-
-    if (deliveredIds.has(item._id)) {
-      continue;
-    }
-
-    if (!shouldDeliverNotification(item, settings)) {
-      continue;
-    }
-
-    await displayLocalNotification({
-      id: buildBackendDeviceNotificationId(item._id),
-      backendNotificationId: item._id,
-      title: item.title,
-      body: item.message,
-      ctaAction: item.ctaAction,
-      ctaLabel: item.ctaLabel,
-      channelId: resolveChannelForNotification(item),
-      data: {
-        notificationType: item.type || 'system',
-      },
-    });
-
-    deliveredIds.add(item._id);
-  }
-
-  await setDeliveredBackendIds(Array.from(deliveredIds));
 }
 
 export async function dismissDeliveredBackendNotification(
   backendNotificationId?: string
 ) {
-  if (!backendNotificationId) return;
+  if (!backendNotificationId) {
+    return;
+  }
 
   await cancelBackendNotification(backendNotificationId);
 

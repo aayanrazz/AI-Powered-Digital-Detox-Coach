@@ -92,6 +92,12 @@ function ProfileStackNavigator() {
   );
 }
 
+const rootStackScreenOptions = {
+  headerStyle: { backgroundColor: '#0B1220' },
+  headerTintColor: '#FFFFFF',
+  contentStyle: { backgroundColor: '#0B1220' },
+};
+
 export default function RootNavigator() {
   const { loading, token, user } = useAuth();
 
@@ -108,7 +114,12 @@ export default function RootNavigator() {
   }
 
   return (
-    <RootStack.Navigator screenOptions={rootStackScreenOptions}>
+    <RootStack.Navigator
+      screenOptions={rootStackScreenOptions}
+      key={`root-${token ? 'signed-in' : 'signed-out'}-${
+        user?.isOnboarded ? 'onboarded' : 'not-onboarded'
+      }`}
+    >
       <RootStack.Screen
         name="MainTabs"
         component={MainTabs}
@@ -121,12 +132,6 @@ export default function RootNavigator() {
     </RootStack.Navigator>
   );
 }
-
-const rootStackScreenOptions = {
-  headerStyle: { backgroundColor: '#0B1220' },
-  headerTintColor: '#FFFFFF',
-  contentStyle: { backgroundColor: '#0B1220' },
-};
 
 const styles = StyleSheet.create({
   tabBar: {

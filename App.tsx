@@ -39,7 +39,10 @@ function NotificationBootstrap() {
         }
       };
 
-      clearLocalState();
+      clearLocalState().catch(() => {
+        // ignore logged-out cleanup failures
+      });
+
       return;
     }
 
@@ -66,18 +69,24 @@ function NotificationBootstrap() {
 
     const delayedStartupSync = InteractionManager.runAfterInteractions(() => {
       setTimeout(() => {
-        syncNow();
+        syncNow().catch(() => {
+          // ignore delayed startup sync failures
+        });
       }, 1200);
     });
 
-    appStateSubscription = AppState.addEventListener('change', (state) => {
+    appStateSubscription = AppState.addEventListener('change', state => {
       if (state === 'active') {
-        syncNow();
+        syncNow().catch(() => {
+          // ignore app-active sync failures
+        });
       }
     });
 
     intervalId = setInterval(() => {
-      syncNow();
+      syncNow().catch(() => {
+        // ignore periodic sync failures
+      });
     }, 60000);
 
     return () => {
@@ -96,6 +105,31 @@ function NotificationBootstrap() {
   }, [loading, token, user?.isOnboarded]);
 
   return null;
+}
+
+function AppNavigationShell() {
+  const { token } = useAuth();
+
+  return (
+    <>
+      <NotificationBootstrap />
+      <NavigationContainer
+        key={token ? 'signed-in' : 'signed-out'}
+        ref={navigationRef}
+        onReady={() => {
+          if (!token) {
+            return;
+          }
+
+          flushPendingNotificationPress().catch(() => {
+            // ignore pending notification flush failures
+          });
+        }}
+      >
+        <RootNavigator />
+      </NavigationContainer>
+    </>
+  );
 }
 
 export default function App() {
@@ -130,17 +164,7 @@ export default function App() {
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
         <AuthProvider>
-          <NotificationBootstrap />
-          <NavigationContainer
-            ref={navigationRef}
-            onReady={() => {
-              flushPendingNotificationPress().catch(() => {
-                // ignore pending notification flush failures
-              });
-            }}
-          >
-            <RootNavigator />
-          </NavigationContainer>
+          <AppNavigationShell />
         </AuthProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

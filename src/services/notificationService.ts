@@ -10,6 +10,7 @@ import notifee, {
 } from '@notifee/react-native';
 import { PermissionsAndroid, Platform } from 'react-native';
 import { api } from '../api/api';
+import { APP_CONFIG } from '../config/appConfig';
 import { navigationRef } from '../navigation/navigationService';
 import { NotificationCtaAction } from '../types';
 import { executeNotificationAction } from '../utils/notificationActions';
@@ -55,7 +56,9 @@ function normalizeTime(value: string, fallback: string) {
   const raw = String(value || '').trim();
   const match = raw.match(/^(\d{1,2}):(\d{2})$/);
 
-  if (!match) return fallback;
+  if (!match) {
+    return fallback;
+  }
 
   const hours = Math.max(0, Math.min(23, Number(match[1])));
   const minutes = Math.max(0, Math.min(59, Number(match[2])));
@@ -94,7 +97,9 @@ function toStringData(
 }
 
 function resolveChannelId(channelId?: string, action?: NotificationCtaAction) {
-  if (channelId) return channelId;
+  if (channelId) {
+    return channelId;
+  }
 
   if (action === 'open_rewards') {
     return NOTIFICATION_CHANNELS.ACHIEVEMENTS;
@@ -126,6 +131,11 @@ function toPendingActionPayload(payload: PressPayload): PendingActionPayload {
   };
 }
 
+async function hasActiveSession(): Promise<boolean> {
+  const token = await AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.TOKEN);
+  return Boolean(token);
+}
+
 async function savePendingPress(payload: PendingActionPayload) {
   await AsyncStorage.setItem(STORAGE_KEYS.PENDING_PRESS, JSON.stringify(payload));
 }
@@ -133,7 +143,9 @@ async function savePendingPress(payload: PendingActionPayload) {
 async function getPendingPress(): Promise<PendingActionPayload | null> {
   const raw = await AsyncStorage.getItem(STORAGE_KEYS.PENDING_PRESS);
 
-  if (!raw) return null;
+  if (!raw) {
+    return null;
+  }
 
   try {
     return JSON.parse(raw) as PendingActionPayload;
@@ -152,7 +164,9 @@ export function buildBackendDeviceNotificationId(backendNotificationId: string) 
 }
 
 export async function cancelDisplayedNotification(notificationId?: string) {
-  if (!notificationId) return;
+  if (!notificationId) {
+    return;
+  }
 
   try {
     await notifee.cancelNotification(notificationId);
@@ -162,7 +176,9 @@ export async function cancelDisplayedNotification(notificationId?: string) {
 }
 
 export async function cancelBackendNotification(backendNotificationId?: string) {
-  if (!backendNotificationId) return;
+  if (!backendNotificationId) {
+    return;
+  }
 
   await cancelDisplayedNotification(
     buildBackendDeviceNotificationId(backendNotificationId)
@@ -186,11 +202,15 @@ export async function cancelAllDetoxNotifications() {
 }
 
 async function syncPressedBackendNotification(payload: PressPayload) {
+  const sessionActive = await hasActiveSession();
+
   if (payload.backendNotificationId) {
-    try {
-      await api.markNotificationRead(payload.backendNotificationId);
-    } catch {
-      // ignore mark-read sync failure
+    if (sessionActive) {
+      try {
+        await api.markNotificationRead(payload.backendNotificationId);
+      } catch {
+        // ignore mark-read sync failure
+      }
     }
 
     await cancelBackendNotification(payload.backendNotificationId);
@@ -203,7 +223,9 @@ async function syncPressedBackendNotification(payload: PressPayload) {
 }
 
 export async function requestNotificationPermission(): Promise<boolean> {
-  if (Platform.OS !== 'android') return true;
+  if (Platform.OS !== 'android') {
+    return true;
+  }
 
   if (typeof Platform.Version === 'number' && Platform.Version >= 33) {
     const granted = await PermissionsAndroid.request(
@@ -385,7 +407,9 @@ export async function scheduleCoreDetoxReminders(options?: {
 }
 
 async function executePendingAction(payload: PendingActionPayload) {
-  if (!navigationRef.isReady()) {
+  const sessionActive = await hasActiveSession();
+
+  if (!sessionActive || !navigationRef.isReady()) {
     await savePendingPress(payload);
     return;
   }
@@ -407,6 +431,12 @@ export async function flushPendingNotificationPress() {
   const pending = await getPendingPress();
 
   if (!pending) {
+    return;
+  }
+
+  const sessionActive = await hasActiveSession();
+
+  if (!sessionActive) {
     return;
   }
 

@@ -1,6 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import notifee, { AndroidImportance } from '@notifee/react-native';
 import { APP_CONFIG } from '../config/appConfig';
+import {
+  handleAuthSessionExpired,
+  isAuthSessionMessage,
+} from '../utils/authSession';
 import type { AppLimit, UsageApp } from '../types';
 import { usageTracker } from '../native/usageTracker';
 
@@ -45,7 +49,9 @@ const HEADERS_CACHE_MS = 15000;
 const SYNC_COOLDOWN_MS = 15000;
 const PRIVACY_CACHE_MS = 15000;
 
-let cachedHeaders: { value: Record<string, string>; at: number } | null = null;
+let cachedHeaders:
+  | { value: Record<string, string>; at: number; token: string | null }
+  | null = null;
 let cachedPrivacyState: { value: PrivacySyncState; at: number } | null = null;
 let inFlightRefreshPromise: Promise<UsageRefreshAndCheckResult> | null = null;
 let notificationChannelPromise: Promise<string> | null = null;
@@ -83,21 +89,28 @@ function withTimeout<T>(
 
 async function getAuthHeaders() {
   const now = Date.now();
+  const token = await AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.TOKEN);
 
-  if (cachedHeaders && now - cachedHeaders.at < HEADERS_CACHE_MS) {
+  if (
+    cachedHeaders &&
+    cachedHeaders.token === token &&
+    now - cachedHeaders.at < HEADERS_CACHE_MS
+  ) {
     return cachedHeaders.value;
   }
 
-  const token = await AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.TOKEN);
-
-  const headers = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
 
   cachedHeaders = {
     value: headers,
     at: now,
+    token,
   };
 
   return headers;
@@ -123,6 +136,30 @@ function firstNumber(...values: any[]): number {
   }
 
   return 0;
+}
+
+async function throwResponseError(
+  response: Response,
+  fallbackMessage: string,
+): Promise<never> {
+  const raw = await response.text();
+
+  let parsedMessage = '';
+
+  try {
+    const json = raw ? JSON.parse(raw) : {};
+    parsedMessage = firstString(json?.message, raw);
+  } catch {
+    parsedMessage = firstString(raw);
+  }
+
+  const message = firstString(parsedMessage, fallbackMessage);
+
+  if (response.status === 401 || isAuthSessionMessage(message)) {
+    throw await handleAuthSessionExpired(message);
+  }
+
+  throw new Error(message);
 }
 
 function extractArray(payload: any): any[] {
@@ -353,7 +390,7 @@ async function getPrivacySyncState(): Promise<PrivacySyncState> {
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch privacy settings. ${response.status}`);
+    await throwResponseError(response, 'Failed to fetch privacy settings.');
   }
 
   const json = await response.json();
@@ -439,10 +476,7 @@ async function syncUsageToBackend(apps: UsageApp[]) {
   );
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Failed to sync usage to backend. ${errorText || response.status}`,
-    );
+    await throwResponseError(response, 'Failed to sync usage to backend.');
   }
 
   lastSyncSignature = signature;
@@ -462,10 +496,7 @@ async function fetchTodayUsageFromBackend(): Promise<UsageApp[]> {
   );
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Failed to fetch today usage. ${errorText || response.status}`,
-    );
+    await throwResponseError(response, 'Failed to fetch today usage.');
   }
 
   const json = await response.json();
@@ -490,6 +521,13 @@ async function fetchAppLimitsFromBackend(): Promise<AppLimit[]> {
   );
 
   if (!response.ok) {
+    if (response.status === 401) {
+      await throwResponseError(
+        response,
+        'Your session has expired. Please log in again.',
+      );
+    }
+
     return [];
   }
 
