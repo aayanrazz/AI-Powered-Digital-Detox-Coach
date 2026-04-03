@@ -1,5 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { APP_CONFIG } from '../config/appConfig';
+import {
+  handleAuthSessionExpired,
+  isAuthSessionError,
+  isAuthSessionMessage,
+} from '../utils/authSession';
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
@@ -58,13 +63,24 @@ export async function http<T>(
     }
 
     if (!response.ok) {
-      throw new Error(
-        data?.message || `Request failed with status ${response.status}`
-      );
+      const message =
+        typeof data?.message === 'string' && data.message.trim()
+          ? data.message
+          : `Request failed with status ${response.status}`;
+
+      if (auth && (response.status === 401 || isAuthSessionMessage(message))) {
+        throw await handleAuthSessionExpired(message);
+      }
+
+      throw new Error(message);
     }
 
     return data as T;
   } catch (error: any) {
+    if (isAuthSessionError(error)) {
+      throw error;
+    }
+
     if (error?.name === 'AbortError') {
       throw new Error(
         'Request timed out. Check that your backend is running and reachable from the emulator.'

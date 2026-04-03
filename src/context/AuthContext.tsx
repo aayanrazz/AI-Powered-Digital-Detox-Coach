@@ -3,6 +3,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { APP_CONFIG } from '../config/appConfig';
 import { api } from '../api/api';
 import { LoginPayload, RegisterPayload, User } from '../types';
+import {
+  clearStoredAuthSession,
+  isAuthSessionError,
+  registerAuthSessionExpiredHandler,
+} from '../utils/authSession';
 
 type AuthContextType = {
   user: User | null;
@@ -17,18 +22,16 @@ type AuthContextType = {
 
 const AuthContext = React.createContext<AuthContextType | undefined>(undefined);
 
-async function clearAuthStorage() {
-  await AsyncStorage.removeItem(APP_CONFIG.STORAGE_KEYS.TOKEN);
-  await AsyncStorage.removeItem(APP_CONFIG.STORAGE_KEYS.USER);
-}
-
 async function persistUser(user: User | null) {
   if (!user) {
     await AsyncStorage.removeItem(APP_CONFIG.STORAGE_KEYS.USER);
     return;
   }
 
-  await AsyncStorage.setItem(APP_CONFIG.STORAGE_KEYS.USER, JSON.stringify(user));
+  await AsyncStorage.setItem(
+    APP_CONFIG.STORAGE_KEYS.USER,
+    JSON.stringify(user)
+  );
 }
 
 function parseStoredUser(raw: string | null): User | null {
@@ -48,53 +51,100 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
 
-  const refreshUser = React.useCallback(async () => {
-    const me = await api.getMe();
-    setUser(me.user);
-    await persistUser(me.user);
+  const clearSession = React.useCallback(async () => {
+    await clearStoredAuthSession();
+    setToken(null);
+    setUser(null);
   }, []);
+
+  const refreshUser = React.useCallback(async () => {
+    try {
+      const me = await api.getMe();
+      setUser(me.user);
+      await persistUser(me.user);
+    } catch (error) {
+      if (isAuthSessionError(error)) {
+        await clearSession();
+        return;
+      }
+
+      throw error;
+    }
+  }, [clearSession]);
+
+  React.useEffect(() => {
+    const unregister = registerAuthSessionExpiredHandler(async () => {
+      await clearSession();
+    });
+
+    return unregister;
+  }, [clearSession]);
 
   React.useEffect(() => {
     let isMounted = true;
 
     const bootstrap = async () => {
       try {
-        const savedToken = await AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.TOKEN);
-        const savedUserRaw = await AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.USER);
+        const [savedToken, savedUserRaw] = await Promise.all([
+          AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.TOKEN),
+          AsyncStorage.getItem(APP_CONFIG.STORAGE_KEYS.USER),
+        ]);
 
         const tokenValue = savedToken || null;
-        const parsedUser = parseStoredUser(savedUserRaw || null);
-
-        if (!isMounted) {
-          return;
-        }
-
-        if (tokenValue) {
-          setToken(tokenValue);
-        }
-
-        if (parsedUser) {
-          setUser(parsedUser);
-        } else if (savedUserRaw) {
-          await AsyncStorage.removeItem(APP_CONFIG.STORAGE_KEYS.USER);
-        }
+        const parsedUser = parseStoredUser(savedUserRaw);
 
         if (!tokenValue) {
-          setLoading(false);
+          await clearStoredAuthSession();
+
+          if (isMounted) {
+            setToken(null);
+            setUser(null);
+          }
+
           return;
         }
 
-        if (parsedUser) {
-          setLoading(false);
-          refreshUser().catch(() => {
-            // keep cached user so app opens even if backend is temporarily unreachable
-          });
-          return;
+        if (isMounted) {
+          setToken(tokenValue);
+          setUser(parsedUser);
         }
 
-        await refreshUser();
+        try {
+          const me = await api.getMe();
+
+          if (!isMounted) {
+            return;
+          }
+
+          setUser(me.user);
+          await persistUser(me.user);
+        } catch (error) {
+          if (isAuthSessionError(error)) {
+            await clearStoredAuthSession();
+
+            if (isMounted) {
+              setToken(null);
+              setUser(null);
+            }
+
+            return;
+          }
+
+          if (!parsedUser) {
+            await clearStoredAuthSession();
+
+            if (isMounted) {
+              setToken(null);
+              setUser(null);
+            }
+
+            return;
+          }
+
+          // keep cached user only for temporary backend/network failure
+        }
       } catch {
-        await clearAuthStorage();
+        await clearStoredAuthSession();
 
         if (isMounted) {
           setToken(null);
@@ -108,7 +158,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     bootstrap().catch(async () => {
-      await clearAuthStorage();
+      await clearStoredAuthSession();
 
       if (isMounted) {
         setToken(null);
@@ -120,7 +170,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       isMounted = false;
     };
-  }, [refreshUser]);
+  }, []);
 
   const login = React.useCallback(async (payload: LoginPayload) => {
     const data = await api.login(payload);
@@ -151,15 +201,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = React.useCallback(async () => {
-    await clearAuthStorage();
-    setToken(null);
-    setUser(null);
-  }, []);
+    await clearSession();
+  }, [clearSession]);
 
   const setUserDirect = React.useCallback((nextUser: User | null) => {
     setUser(nextUser);
     persistUser(nextUser).catch(() => {
-      // ignore storage update failures for manual local user updates
+      // ignore storage update failures for manual local updates
     });
   }, []);
 
@@ -169,8 +217,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       token,
       loading,
       login,
-      register,
       logout,
+      register,
       refreshUser,
       setUserDirect,
     }),
@@ -182,8 +230,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 export function useAuth() {
   const context = React.useContext(AuthContext);
+
   if (!context) {
     throw new Error('useAuth must be used inside AuthProvider');
   }
+
   return context;
 }
