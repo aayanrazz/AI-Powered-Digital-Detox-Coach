@@ -40,27 +40,61 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
             "com.vivo.launcher",
             "com.realme.launcher",
             "com.huawei.android.launcher",
-            "com.transsion.hilauncher"
+            "com.transsion.hilauncher",
+            "com.google.android.settings.intelligence",
+            "com.google.android.documentsui",
+            "com.android.documentsui",
+            "com.android.packageinstaller",
+            "com.google.android.packageinstaller"
         )
 
         private val BLOCKED_PACKAGE_PREFIXES = listOf(
             "com.android.systemui",
             "com.android.permissioncontroller",
             "com.google.android.permissioncontroller",
-            "com.google.android.overlay.modules.permissioncontroller"
+            "com.google.android.overlay.modules.permissioncontroller",
+            "com.android.providers.",
+            "com.google.android.overlay.modules."
+        )
+
+        private val BLOCKED_PACKAGE_FRAGMENTS = listOf(
+            "settings.intelligence",
+            "documentsui",
+            "packageinstaller",
+            "permissioncontroller"
         )
 
         private val BLOCKED_NAME_FRAGMENTS = listOf(
             "launcher",
             "pixel launcher",
             "system ui",
-            "permission controller"
+            "permission controller",
+            "settings intelligence",
+            "document ui",
+            "documentsui",
+            "package installer"
+        )
+
+        private val READABLE_TOKEN_MAP = mapOf(
+            "whatsapp" to "WhatsApp",
+            "youtube" to "YouTube",
+            "gmail" to "Gmail",
+            "instagram" to "Instagram",
+            "facebook" to "Facebook",
+            "messenger" to "Messenger",
+            "tiktok" to "TikTok",
+            "spotify" to "Spotify",
+            "netflix" to "Netflix",
+            "chrome" to "Chrome",
+            "telegram" to "Telegram",
+            "snapchat" to "Snapchat"
         )
     }
 
     private val appLabelCache = ConcurrentHashMap<String, String>()
     private val categoryCache = ConcurrentHashMap<String, String>()
     private val launcherPackages by lazy { resolveLauncherPackages() }
+    private val launchablePackages by lazy { resolveLaunchablePackages() }
 
     @Volatile
     private var lastUsageCacheAt: Long = 0L
@@ -135,6 +169,59 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    private fun resolveLaunchablePackages(): Set<String> {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+
+        return try {
+            reactContext.packageManager
+                .queryIntentActivities(intent, 0)
+                .mapNotNull { it.activityInfo?.packageName }
+                .map { normalizePackageName(it) }
+                .filter { it.isNotBlank() }
+                .toSet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+    }
+
+    private fun buildReadableLabelFromPackage(packageName: String): String {
+        val normalized = normalizePackageName(packageName)
+        if (normalized.isBlank()) return "Unknown App"
+
+        val ignoredTokens = setOf("com", "org", "net", "android", "google", "apps", "app", "mobile")
+
+        val tokens = normalized
+            .split(".")
+            .flatMap { it.split("_", "-") }
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !ignoredTokens.contains(it) }
+
+        val meaningfulTokens = if (tokens.size >= 2) tokens.takeLast(2) else tokens
+
+        return meaningfulTokens
+            .joinToString(" ") { token ->
+                READABLE_TOKEN_MAP[token] ?: token.replaceFirstChar { char ->
+                    if (char.isLowerCase()) char.titlecase() else char.toString()
+                }
+            }
+            .ifBlank { packageName }
+    }
+
+    private fun normalizeLabel(appLabel: String, packageName: String): String {
+        val raw = appLabel.trim()
+        if (raw.isBlank()) {
+            return buildReadableLabelFromPackage(packageName)
+        }
+
+        return if (raw.equals(packageName, ignoreCase = true)) {
+            buildReadableLabelFromPackage(packageName)
+        } else {
+            raw
+        }
+    }
+
     private fun shouldIgnoreByName(appName: String, packageName: String): Boolean {
         val lowerLabel = appName.lowercase()
         val lowerPackage = normalizePackageName(packageName)
@@ -146,7 +233,8 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
         return lowerPackage == "android" ||
             lowerPackage == reactContext.packageName.lowercase() ||
             lowerPackage in BLOCKED_PACKAGE_EXACT ||
-            BLOCKED_PACKAGE_PREFIXES.any { prefix -> lowerPackage.startsWith(prefix) }
+            BLOCKED_PACKAGE_PREFIXES.any { prefix -> lowerPackage.startsWith(prefix) } ||
+            BLOCKED_PACKAGE_FRAGMENTS.any { fragment -> lowerPackage.contains(fragment) }
     }
 
     private fun isIgnoredPackage(packageName: String): Boolean {
@@ -158,6 +246,14 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
         if (launcherPackages.contains(normalizedPackage)) return true
 
         if (BLOCKED_PACKAGE_PREFIXES.any { prefix -> normalizedPackage.startsWith(prefix) }) {
+            return true
+        }
+
+        if (BLOCKED_PACKAGE_FRAGMENTS.any { fragment -> normalizedPackage.contains(fragment) }) {
+            return true
+        }
+
+        if (launchablePackages.isNotEmpty() && !launchablePackages.contains(normalizedPackage)) {
             return true
         }
 
@@ -180,6 +276,7 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
             haystack.contains("youtube") ||
                 haystack.contains("netflix") ||
                 haystack.contains("spotify") ||
+                haystack.contains("music") ||
                 haystack.contains("prime video") -> "Streaming"
 
             haystack.contains("classroom") ||
@@ -208,9 +305,10 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
         val label = try {
             val pm = reactContext.packageManager
             val appInfo = pm.getApplicationInfo(packageName, 0)
-            pm.getApplicationLabel(appInfo).toString()
-        } catch (e: Exception) {
-            packageName
+            val resolved = pm.getApplicationLabel(appInfo).toString()
+            normalizeLabel(resolved, packageName)
+        } catch (_: Exception) {
+            buildReadableLabelFromPackage(packageName)
         }
 
         appLabelCache[packageName] = label

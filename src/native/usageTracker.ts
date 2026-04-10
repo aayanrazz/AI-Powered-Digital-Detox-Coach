@@ -35,6 +35,11 @@ const BLOCKED_PACKAGE_EXACT = new Set([
   'com.realme.launcher',
   'com.huawei.android.launcher',
   'com.transsion.hilauncher',
+  'com.google.android.settings.intelligence',
+  'com.google.android.documentsui',
+  'com.android.documentsui',
+  'com.android.packageinstaller',
+  'com.google.android.packageinstaller',
 ]);
 
 const BLOCKED_PACKAGE_PREFIXES = [
@@ -42,6 +47,15 @@ const BLOCKED_PACKAGE_PREFIXES = [
   'com.android.permissioncontroller',
   'com.google.android.permissioncontroller',
   'com.google.android.overlay.modules.permissioncontroller',
+  'com.android.providers.',
+  'com.google.android.overlay.modules.',
+];
+
+const BLOCKED_PACKAGE_FRAGMENTS = [
+  'settings.intelligence',
+  'documentsui',
+  'packageinstaller',
+  'permissioncontroller',
 ];
 
 const BLOCKED_NAME_FRAGMENTS = [
@@ -49,7 +63,37 @@ const BLOCKED_NAME_FRAGMENTS = [
   'pixel launcher',
   'system ui',
   'permission controller',
+  'settings intelligence',
+  'document ui',
+  'documentsui',
+  'package installer',
 ];
+
+const READABLE_TOKEN_MAP: Record<string, string> = {
+  whatsapp: 'WhatsApp',
+  youtube: 'YouTube',
+  gmail: 'Gmail',
+  instagram: 'Instagram',
+  facebook: 'Facebook',
+  messenger: 'Messenger',
+  tiktok: 'TikTok',
+  spotify: 'Spotify',
+  netflix: 'Netflix',
+  chrome: 'Chrome',
+  telegram: 'Telegram',
+  snapchat: 'Snapchat',
+};
+
+const IGNORED_PACKAGE_TOKENS = new Set([
+  'com',
+  'org',
+  'net',
+  'android',
+  'google',
+  'apps',
+  'app',
+  'mobile',
+]);
 
 let permissionCache: { value: boolean; checkedAt: number } | null = null;
 let usageCache: { value: UsageApp[]; checkedAt: number } | null = null;
@@ -81,8 +125,59 @@ function normalizePackageName(value?: string): string {
   return String(value || '').trim().toLowerCase();
 }
 
-function normalizeAppName(value?: string, fallback?: string): string {
-  return String(value || fallback || 'Unknown App').trim();
+function capitalizeToken(token: string): string {
+  if (!token) return '';
+  return token.charAt(0).toUpperCase() + token.slice(1);
+}
+
+function buildReadableAppNameFromPackage(packageName?: string): string {
+  const normalized = normalizePackageName(packageName);
+
+  if (!normalized) {
+    return 'Unknown App';
+  }
+
+  const tokens = normalized
+    .split('.')
+    .flatMap((part) => part.split(/[_-]/g))
+    .map((part) => part.trim())
+    .filter(
+      (part) => part.length > 0 && !IGNORED_PACKAGE_TOKENS.has(part)
+    );
+
+  const meaningfulTokens =
+    tokens.length >= 2 ? tokens.slice(-2) : tokens;
+
+  const readable = meaningfulTokens
+    .map((token) => READABLE_TOKEN_MAP[token] || capitalizeToken(token))
+    .join(' ')
+    .trim();
+
+  return readable || packageName || 'Unknown App';
+}
+
+function isProbablyPackageLabel(appName?: string, packageName?: string): boolean {
+  const normalizedName = normalizePackageName(appName);
+  const normalizedPackage = normalizePackageName(packageName);
+
+  if (!normalizedName) return true;
+  if (normalizedName === normalizedPackage) return true;
+
+  return /^[a-z0-9_.]+$/.test(normalizedName) && normalizedName.includes('.');
+}
+
+function normalizeAppName(value?: string, fallbackPackage?: string): string {
+  const raw = String(value || '').trim();
+
+  if (!raw) {
+    return buildReadableAppNameFromPackage(fallbackPackage);
+  }
+
+  if (isProbablyPackageLabel(raw, fallbackPackage)) {
+    return buildReadableAppNameFromPackage(fallbackPackage);
+  }
+
+  return raw;
 }
 
 function isIgnoredUsageApp(item: {
@@ -95,9 +190,11 @@ function isIgnoredUsageApp(item: {
   if (!packageName) return true;
   if (BLOCKED_PACKAGE_EXACT.has(packageName)) return true;
 
-  if (
-    BLOCKED_PACKAGE_PREFIXES.some((prefix) => packageName.startsWith(prefix))
-  ) {
+  if (BLOCKED_PACKAGE_PREFIXES.some((prefix) => packageName.startsWith(prefix))) {
+    return true;
+  }
+
+  if (BLOCKED_PACKAGE_FRAGMENTS.some((fragment) => packageName.includes(fragment))) {
     return true;
   }
 
@@ -108,7 +205,7 @@ function isIgnoredUsageApp(item: {
   return false;
 }
 
-function normalizeCategory(value: string | undefined): string {
+function normalizeCategory(value?: string): string {
   const raw = String(value || '').trim();
   const lower = raw.toLowerCase();
 
@@ -122,27 +219,59 @@ function normalizeCategory(value: string | undefined): string {
   return raw || 'Other';
 }
 
+function toSafeNumber(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function normalizeUsageRows(data: any[]): UsageApp[] {
   if (!Array.isArray(data)) return [];
 
-  return data
-    .map((item: any) => ({
-      packageName: String(item?.packageName || '').trim(),
-      appName: normalizeAppName(item?.appName, item?.packageName),
-      foregroundMs: Number(item?.foregroundMs || 0),
-      minutesUsed: Number(item?.minutesUsed || 0),
-      lastTimeUsed: item?.lastTimeUsed ? Number(item.lastTimeUsed) : undefined,
-      pickups: Number(item?.pickups || 0),
-      unlocks: Number(item?.unlocks || 0),
-      category: normalizeCategory(item?.category),
-    }))
+  const cleaned = data
+    .map((item: any): UsageApp => {
+      const packageName = String(item?.packageName || '').trim();
+      const appName = normalizeAppName(item?.appName, packageName);
+
+      return {
+        packageName,
+        appName,
+        foregroundMs: toSafeNumber(item?.foregroundMs, 0),
+        minutesUsed: toSafeNumber(item?.minutesUsed, 0),
+        lastTimeUsed:
+          item?.lastTimeUsed !== undefined && item?.lastTimeUsed !== null
+            ? toSafeNumber(item.lastTimeUsed, 0)
+            : undefined,
+        pickups: toSafeNumber(item?.pickups, 0),
+        unlocks: toSafeNumber(item?.unlocks, 0),
+        category: normalizeCategory(item?.category),
+      };
+    })
     .filter((item: UsageApp) => !isIgnoredUsageApp(item))
     .filter(
       (item: UsageApp) =>
         !!String(item.packageName || '').trim() &&
         Number(item.minutesUsed || 0) > 0
-    )
-    .sort((a: UsageApp, b: UsageApp) => b.minutesUsed - a.minutesUsed);
+    );
+
+  const byPackage = new Map<string, UsageApp>();
+
+  for (const item of cleaned) {
+    const key = normalizePackageName(item.packageName);
+    const existing = byPackage.get(key);
+
+    if (!existing) {
+      byPackage.set(key, item);
+      continue;
+    }
+
+    if ((item.minutesUsed || 0) > (existing.minutesUsed || 0)) {
+      byPackage.set(key, item);
+    }
+  }
+
+  return Array.from(byPackage.values()).sort(
+    (a: UsageApp, b: UsageApp) => b.minutesUsed - a.minutesUsed
+  );
 }
 
 export const usageTracker = {
@@ -162,7 +291,7 @@ export const usageTracker = {
         return permissionCache.value;
       }
 
-      const granted = await withTimeout(
+      const granted = await withTimeout<boolean>(
         UsageStatsModule.isUsagePermissionGranted(),
         REQUEST_TIMEOUT_MS,
         'Usage permission check timed out.'
@@ -184,58 +313,53 @@ export const usageTracker = {
   },
 
   async openPermissionSettings(): Promise<boolean | void> {
-    try {
-      permissionCache = null;
+    permissionCache = null;
 
-      if (Platform.OS !== 'android' || !UsageStatsModule) {
-        await Linking.openSettings();
-        return;
-      }
-
-      return await UsageStatsModule.openUsageAccessSettings();
-    } catch (error) {
-      throw error;
+    if (Platform.OS !== 'android' || !UsageStatsModule) {
+      return Linking.openSettings();
     }
+
+    return withTimeout<boolean>(
+      UsageStatsModule.openUsageAccessSettings(),
+      REQUEST_TIMEOUT_MS,
+      'Opening usage access settings timed out.'
+    );
   },
 
   async getTodayUsage(force = false): Promise<UsageApp[]> {
+    if (Platform.OS !== 'android' || !UsageStatsModule) return [];
+
+    const now = Date.now();
+
+    if (!force && usageCache && now - usageCache.checkedAt < USAGE_CACHE_MS) {
+      return usageCache.value;
+    }
+
+    if (inFlightUsagePromise) {
+      return inFlightUsagePromise;
+    }
+
+    inFlightUsagePromise = (async () => {
+      const data = await withTimeout<any[]>(
+        UsageStatsModule.getTodayUsageStats(),
+        REQUEST_TIMEOUT_MS,
+        'Reading Android usage took too long.'
+      );
+
+      const normalized = normalizeUsageRows(data);
+
+      usageCache = {
+        value: normalized,
+        checkedAt: Date.now(),
+      };
+
+      return normalized;
+    })();
+
     try {
-      if (Platform.OS !== 'android' || !UsageStatsModule) return [];
-
-      const now = Date.now();
-
-      if (!force && usageCache && now - usageCache.checkedAt < USAGE_CACHE_MS) {
-        return usageCache.value;
-      }
-
-      if (inFlightUsagePromise) {
-        return inFlightUsagePromise;
-      }
-
-      inFlightUsagePromise = (async () => {
-        const data = await withTimeout(
-          UsageStatsModule.getTodayUsageStats(),
-          REQUEST_TIMEOUT_MS,
-          'Reading Android usage took too long.'
-        );
-
-        const normalized = normalizeUsageRows(data);
-
-        usageCache = {
-          value: normalized,
-          checkedAt: Date.now(),
-        };
-
-        return normalized;
-      })();
-
-      try {
-        return await inFlightUsagePromise;
-      } finally {
-        inFlightUsagePromise = null;
-      }
-    } catch (error) {
-      throw error;
+      return await inFlightUsagePromise;
+    } finally {
+      inFlightUsagePromise = null;
     }
   },
 

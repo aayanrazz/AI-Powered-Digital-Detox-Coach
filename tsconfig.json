@@ -5,13 +5,18 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "strict": true,
-    "types": ["react", "react-native", "jest"]
+    "types": ["jest", "node", "react", "react-native"]
   },
   "include": [
     "App.tsx",
     "index.js",
     "src/**/*.ts",
     "src/**/*.tsx",
+    "__tests__/**/*.ts",
+    "__tests__/**/*.tsx",
+    "**/*.test.ts",
+    "**/*.test.tsx",
     "jest.setup.js"
-  ]
+  ],
+  "exclude": ["node_modules"]
 }
