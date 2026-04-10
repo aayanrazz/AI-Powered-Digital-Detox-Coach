@@ -11,9 +11,9 @@ const UsageStatsModule = NativeModules.UsageStatsModule as
   | UsageStatsModuleType
   | undefined;
 
-const PERMISSION_CACHE_MS = 10000;
-const USAGE_CACHE_MS = 10000;
-const REQUEST_TIMEOUT_MS = 12000;
+const PERMISSION_CACHE_MS = 8000;
+const USAGE_CACHE_MS = 8000;
+const REQUEST_TIMEOUT_MS = 8000;
 
 const OWN_APP_PACKAGE = 'com.detoxcoachmobile';
 
@@ -102,7 +102,7 @@ let inFlightUsagePromise: Promise<UsageApp[]> | null = null;
 function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  timeoutMessage: string
+  timeoutMessage: string,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -110,11 +110,11 @@ function withTimeout<T>(
     }, timeoutMs);
 
     promise
-      .then((value) => {
+      .then(value => {
         clearTimeout(timer);
         resolve(value);
       })
-      .catch((error) => {
+      .catch(error => {
         clearTimeout(timer);
         reject(error);
       });
@@ -139,17 +139,14 @@ function buildReadableAppNameFromPackage(packageName?: string): string {
 
   const tokens = normalized
     .split('.')
-    .flatMap((part) => part.split(/[_-]/g))
-    .map((part) => part.trim())
-    .filter(
-      (part) => part.length > 0 && !IGNORED_PACKAGE_TOKENS.has(part)
-    );
+    .flatMap(part => part.split(/[_-]/g))
+    .map(part => part.trim())
+    .filter(part => part.length > 0 && !IGNORED_PACKAGE_TOKENS.has(part));
 
-  const meaningfulTokens =
-    tokens.length >= 2 ? tokens.slice(-2) : tokens;
+  const meaningfulTokens = tokens.length >= 2 ? tokens.slice(-2) : tokens;
 
   const readable = meaningfulTokens
-    .map((token) => READABLE_TOKEN_MAP[token] || capitalizeToken(token))
+    .map(token => READABLE_TOKEN_MAP[token] || capitalizeToken(token))
     .join(' ')
     .trim();
 
@@ -190,15 +187,15 @@ function isIgnoredUsageApp(item: {
   if (!packageName) return true;
   if (BLOCKED_PACKAGE_EXACT.has(packageName)) return true;
 
-  if (BLOCKED_PACKAGE_PREFIXES.some((prefix) => packageName.startsWith(prefix))) {
+  if (BLOCKED_PACKAGE_PREFIXES.some(prefix => packageName.startsWith(prefix))) {
     return true;
   }
 
-  if (BLOCKED_PACKAGE_FRAGMENTS.some((fragment) => packageName.includes(fragment))) {
+  if (BLOCKED_PACKAGE_FRAGMENTS.some(fragment => packageName.includes(fragment))) {
     return true;
   }
 
-  if (BLOCKED_NAME_FRAGMENTS.some((fragment) => appName.includes(fragment))) {
+  if (BLOCKED_NAME_FRAGMENTS.some(fragment => appName.includes(fragment))) {
     return true;
   }
 
@@ -230,11 +227,10 @@ function normalizeUsageRows(data: any[]): UsageApp[] {
   const cleaned = data
     .map((item: any): UsageApp => {
       const packageName = String(item?.packageName || '').trim();
-      const appName = normalizeAppName(item?.appName, packageName);
 
       return {
         packageName,
-        appName,
+        appName: normalizeAppName(item?.appName, packageName),
         foregroundMs: toSafeNumber(item?.foregroundMs, 0),
         minutesUsed: toSafeNumber(item?.minutesUsed, 0),
         lastTimeUsed:
@@ -246,11 +242,11 @@ function normalizeUsageRows(data: any[]): UsageApp[] {
         category: normalizeCategory(item?.category),
       };
     })
-    .filter((item: UsageApp) => !isIgnoredUsageApp(item))
+    .filter(item => !isIgnoredUsageApp(item))
     .filter(
-      (item: UsageApp) =>
+      item =>
         !!String(item.packageName || '').trim() &&
-        Number(item.minutesUsed || 0) > 0
+        Number(item.minutesUsed || 0) > 0,
     );
 
   const byPackage = new Map<string, UsageApp>();
@@ -259,18 +255,13 @@ function normalizeUsageRows(data: any[]): UsageApp[] {
     const key = normalizePackageName(item.packageName);
     const existing = byPackage.get(key);
 
-    if (!existing) {
-      byPackage.set(key, item);
-      continue;
-    }
-
-    if ((item.minutesUsed || 0) > (existing.minutesUsed || 0)) {
+    if (!existing || (item.minutesUsed || 0) > (existing.minutesUsed || 0)) {
       byPackage.set(key, item);
     }
   }
 
   return Array.from(byPackage.values()).sort(
-    (a: UsageApp, b: UsageApp) => b.minutesUsed - a.minutesUsed
+    (a, b) => b.minutesUsed - a.minutesUsed,
   );
 }
 
@@ -294,7 +285,7 @@ export const usageTracker = {
       const granted = await withTimeout<boolean>(
         UsageStatsModule.isUsagePermissionGranted(),
         REQUEST_TIMEOUT_MS,
-        'Usage permission check timed out.'
+        'Usage permission check timed out.',
       );
 
       permissionCache = {
@@ -315,15 +306,19 @@ export const usageTracker = {
   async openPermissionSettings(): Promise<boolean | void> {
     permissionCache = null;
 
-    if (Platform.OS !== 'android' || !UsageStatsModule) {
-      return Linking.openSettings();
-    }
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return Linking.openSettings();
+      }
 
-    return withTimeout<boolean>(
-      UsageStatsModule.openUsageAccessSettings(),
-      REQUEST_TIMEOUT_MS,
-      'Opening usage access settings timed out.'
-    );
+      return await withTimeout<boolean>(
+        UsageStatsModule.openUsageAccessSettings(),
+        REQUEST_TIMEOUT_MS,
+        'Opening usage access settings timed out.',
+      );
+    } catch {
+      return false;
+    }
   },
 
   async getTodayUsage(force = false): Promise<UsageApp[]> {
@@ -340,20 +335,31 @@ export const usageTracker = {
     }
 
     inFlightUsagePromise = (async () => {
-      const data = await withTimeout<any[]>(
-        UsageStatsModule.getTodayUsageStats(),
-        REQUEST_TIMEOUT_MS,
-        'Reading Android usage took too long.'
-      );
+      try {
+        const data = await withTimeout<any[]>(
+          UsageStatsModule.getTodayUsageStats(),
+          REQUEST_TIMEOUT_MS,
+          'Reading Android usage took too long.',
+        );
 
-      const normalized = normalizeUsageRows(data);
+        const normalized = normalizeUsageRows(data);
 
-      usageCache = {
-        value: normalized,
-        checkedAt: Date.now(),
-      };
+        usageCache = {
+          value: normalized,
+          checkedAt: Date.now(),
+        };
 
-      return normalized;
+        return normalized;
+      } catch {
+        const fallback: UsageApp[] = [];
+
+        usageCache = {
+          value: fallback,
+          checkedAt: Date.now(),
+        };
+
+        return fallback;
+      }
     })();
 
     try {

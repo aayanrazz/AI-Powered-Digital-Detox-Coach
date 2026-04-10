@@ -22,10 +22,13 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     companion object {
-        private const val USAGE_CACHE_MS = 10000L
+        private const val USAGE_CACHE_MS = 8000L
+        private const val MAX_RESULT_ROWS = 60
+        private const val OWN_APP_PACKAGE = "com.detoxcoachmobile"
 
         private val BLOCKED_PACKAGE_EXACT = setOf(
             "android",
+            OWN_APP_PACKAGE,
             "com.google.android.apps.nexuslauncher",
             "com.android.launcher",
             "com.android.launcher3",
@@ -94,7 +97,6 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
     private val appLabelCache = ConcurrentHashMap<String, String>()
     private val categoryCache = ConcurrentHashMap<String, String>()
     private val launcherPackages by lazy { resolveLauncherPackages() }
-    private val launchablePackages by lazy { resolveLaunchablePackages() }
 
     @Volatile
     private var lastUsageCacheAt: Long = 0L
@@ -134,8 +136,8 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
     fun isUsagePermissionGranted(promise: Promise) {
         try {
             promise.resolve(hasUsagePermission())
-        } catch (e: Exception) {
-            promise.reject("USAGE_PERMISSION_ERROR", e.message, e)
+        } catch (_: Exception) {
+            promise.resolve(false)
         }
     }
 
@@ -146,8 +148,8 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             reactContext.startActivity(intent)
             promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("OPEN_SETTINGS_ERROR", e.message, e)
+        } catch (_: Exception) {
+            promise.resolve(false)
         }
     }
 
@@ -169,28 +171,13 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun resolveLaunchablePackages(): Set<String> {
-        val intent = Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_LAUNCHER)
-        }
-
-        return try {
-            reactContext.packageManager
-                .queryIntentActivities(intent, 0)
-                .mapNotNull { it.activityInfo?.packageName }
-                .map { normalizePackageName(it) }
-                .filter { it.isNotBlank() }
-                .toSet()
-        } catch (_: Exception) {
-            emptySet()
-        }
-    }
-
     private fun buildReadableLabelFromPackage(packageName: String): String {
         val normalized = normalizePackageName(packageName)
         if (normalized.isBlank()) return "Unknown App"
 
-        val ignoredTokens = setOf("com", "org", "net", "android", "google", "apps", "app", "mobile")
+        val ignoredTokens = setOf(
+            "com", "org", "net", "android", "google", "apps", "app", "mobile"
+        )
 
         val tokens = normalized
             .split(".")
@@ -202,8 +189,8 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
 
         return meaningfulTokens
             .joinToString(" ") { token ->
-                READABLE_TOKEN_MAP[token] ?: token.replaceFirstChar { char ->
-                    if (char.isLowerCase()) char.titlecase() else char.toString()
+                READABLE_TOKEN_MAP[token] ?: token.replaceFirstChar { ch ->
+                    if (ch.isLowerCase()) ch.titlecase() else ch.toString()
                 }
             }
             .ifBlank { packageName }
@@ -211,6 +198,7 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
 
     private fun normalizeLabel(appLabel: String, packageName: String): String {
         val raw = appLabel.trim()
+
         if (raw.isBlank()) {
             return buildReadableLabelFromPackage(packageName)
         }
@@ -220,6 +208,22 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
         } else {
             raw
         }
+    }
+
+    private fun getCachedAppLabel(packageName: String): String {
+        appLabelCache[packageName]?.let { return it }
+
+        val label = try {
+            val pm = reactContext.packageManager
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            val resolved = pm.getApplicationLabel(appInfo).toString()
+            normalizeLabel(resolved, packageName)
+        } catch (_: Exception) {
+            buildReadableLabelFromPackage(packageName)
+        }
+
+        appLabelCache[packageName] = label
+        return label
     }
 
     private fun shouldIgnoreByName(appName: String, packageName: String): Boolean {
@@ -253,10 +257,6 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
             return true
         }
 
-        if (launchablePackages.isNotEmpty() && !launchablePackages.contains(normalizedPackage)) {
-            return true
-        }
-
         val appLabel = getCachedAppLabel(packageName)
         return shouldIgnoreByName(appLabel, normalizedPackage)
     }
@@ -271,7 +271,9 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
                 haystack.contains("snapchat") ||
                 haystack.contains("reddit") ||
                 haystack.contains("twitter") ||
-                haystack.contains("x.com") -> "Social Media"
+                haystack.contains("x.com") ||
+                haystack.contains("whatsapp") ||
+                haystack.contains("messenger") -> "Social Media"
 
             haystack.contains("youtube") ||
                 haystack.contains("netflix") ||
@@ -299,22 +301,6 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun getCachedAppLabel(packageName: String): String {
-        appLabelCache[packageName]?.let { return it }
-
-        val label = try {
-            val pm = reactContext.packageManager
-            val appInfo = pm.getApplicationInfo(packageName, 0)
-            val resolved = pm.getApplicationLabel(appInfo).toString()
-            normalizeLabel(resolved, packageName)
-        } catch (_: Exception) {
-            buildReadableLabelFromPackage(packageName)
-        }
-
-        appLabelCache[packageName] = label
-        return label
-    }
-
     private fun getCachedCategory(appLabel: String, packageName: String): String {
         categoryCache[packageName]?.let { return it }
 
@@ -328,7 +314,6 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
 
         rows.forEach { row ->
             val map = WritableNativeMap()
-
             map.putString("packageName", row["packageName"] as String)
             map.putString("appName", row["appName"] as String)
             map.putDouble("foregroundMs", (row["foregroundMs"] as Number).toDouble())
@@ -337,7 +322,6 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
             map.putInt("pickups", (row["pickups"] as Number).toInt())
             map.putInt("unlocks", (row["unlocks"] as Number).toInt())
             map.putString("category", row["category"] as String)
-
             resultArray.pushMap(map)
         }
 
@@ -348,7 +332,7 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
     fun getTodayUsageStats(promise: Promise) {
         try {
             if (!hasUsagePermission()) {
-                promise.reject("PERMISSION_DENIED", "Usage access permission is not granted.")
+                promise.resolve(WritableNativeArray())
                 return
             }
 
@@ -372,13 +356,19 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
             val startTime = calendar.timeInMillis
             val endTime = now
 
-            val stats: List<UsageStats> = usageStatsManager
-                .queryUsageStats(UsageStatsManager.INTERVAL_DAILY, startTime, endTime)
-                .filter { stat ->
-                    stat.totalTimeInForeground > 0 &&
-                        !isIgnoredPackage(stat.packageName)
-                }
+            val rawStats = usageStatsManager.queryUsageStats(
+                UsageStatsManager.INTERVAL_DAILY,
+                startTime,
+                endTime
+            ) ?: emptyList()
+
+            val stats: List<UsageStats> = rawStats
+                .asSequence()
+                .filter { it.totalTimeInForeground > 0 }
+                .filter { !isIgnoredPackage(it.packageName) }
                 .sortedByDescending { it.totalTimeInForeground }
+                .take(MAX_RESULT_ROWS)
+                .toList()
 
             val trackedPackages = stats
                 .map { normalizePackageName(it.packageName) }
@@ -388,64 +378,59 @@ class UsageStatsModule(private val reactContext: ReactApplicationContext) :
             val openCounts = mutableMapOf<String, Int>()
             val interactionCounts = mutableMapOf<String, Int>()
 
-            val usageEvents = usageStatsManager.queryEvents(startTime, endTime)
-            val event = UsageEvents.Event()
+            try {
+                val usageEvents = usageStatsManager.queryEvents(startTime, endTime)
+                val event = UsageEvents.Event()
 
-            while (usageEvents.hasNextEvent()) {
-                usageEvents.getNextEvent(event)
+                while (usageEvents.hasNextEvent()) {
+                    usageEvents.getNextEvent(event)
 
-                val rawPackageName = event.packageName ?: continue
-                val normalizedPackage = normalizePackageName(rawPackageName)
+                    val rawPackageName = event.packageName ?: continue
+                    val normalizedPackage = normalizePackageName(rawPackageName)
 
-                if (!trackedPackages.contains(normalizedPackage)) continue
+                    if (!trackedPackages.contains(normalizedPackage)) continue
 
-                when (event.eventType) {
-                    UsageEvents.Event.MOVE_TO_FOREGROUND,
-                    UsageEvents.Event.ACTIVITY_RESUMED -> {
-                        openCounts[normalizedPackage] =
-                            (openCounts[normalizedPackage] ?: 0) + 1
-                    }
+                    when (event.eventType) {
+                        UsageEvents.Event.MOVE_TO_FOREGROUND,
+                        UsageEvents.Event.ACTIVITY_RESUMED -> {
+                            openCounts[normalizedPackage] =
+                                (openCounts[normalizedPackage] ?: 0) + 1
+                        }
 
-                    UsageEvents.Event.USER_INTERACTION -> {
-                        interactionCounts[normalizedPackage] =
-                            (interactionCounts[normalizedPackage] ?: 0) + 1
+                        UsageEvents.Event.USER_INTERACTION -> {
+                            interactionCounts[normalizedPackage] =
+                                (interactionCounts[normalizedPackage] ?: 0) + 1
+                        }
                     }
                 }
+            } catch (_: Exception) {
             }
 
-            val rows = stats.mapNotNull { stat ->
-                if (isIgnoredPackage(stat.packageName)) {
-                    null
-                } else {
-                    val appLabel = getCachedAppLabel(stat.packageName)
-                    val category = getCachedCategory(appLabel, stat.packageName)
-                    val normalizedPackage = normalizePackageName(stat.packageName)
+            val rows = stats.map { stat ->
+                val appLabel = getCachedAppLabel(stat.packageName)
+                val normalizedPackage = normalizePackageName(stat.packageName)
 
-                    val minutesUsed =
-                        kotlin.math.max(
-                            1,
-                            ((stat.totalTimeInForeground + 59999L) / 60000L).toInt()
-                        )
-
-                    mapOf(
-                        "packageName" to stat.packageName,
-                        "appName" to appLabel,
-                        "foregroundMs" to stat.totalTimeInForeground.toDouble(),
-                        "minutesUsed" to minutesUsed,
-                        "lastTimeUsed" to stat.lastTimeUsed.toDouble(),
-                        "pickups" to (openCounts[normalizedPackage] ?: 0),
-                        "unlocks" to (interactionCounts[normalizedPackage] ?: 0),
-                        "category" to category
-                    )
-                }
+                mapOf(
+                    "packageName" to stat.packageName,
+                    "appName" to appLabel,
+                    "foregroundMs" to stat.totalTimeInForeground.toDouble(),
+                    "minutesUsed" to kotlin.math.max(
+                        1,
+                        ((stat.totalTimeInForeground + 59999L) / 60000L).toInt()
+                    ),
+                    "lastTimeUsed" to stat.lastTimeUsed.toDouble(),
+                    "pickups" to (openCounts[normalizedPackage] ?: 0),
+                    "unlocks" to (interactionCounts[normalizedPackage] ?: 0),
+                    "category" to getCachedCategory(appLabel, stat.packageName)
+                )
             }
 
             lastUsageCacheRows = rows
             lastUsageCacheAt = now
 
             promise.resolve(toWritableArray(rows))
-        } catch (e: Exception) {
-            promise.reject("USAGE_STATS_ERROR", e.message, e)
+        } catch (_: Exception) {
+            promise.resolve(WritableNativeArray())
         }
     }
 }
