@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { AppState, InteractionManager, StyleSheet } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { DefaultTheme, NavigationContainer } from '@react-navigation/native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from './src/context/AuthContext';
@@ -21,6 +21,24 @@ import {
   runLocalInterventionCheck,
 } from './src/services/interventionService';
 
+const appNavigationTheme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    background: '#0B1220',
+    card: '#0B1220',
+    text: '#FFFFFF',
+    border: '#1E293B',
+    primary: '#4F46E5',
+    notification: '#EF4444',
+  },
+};
+
+const NOTIFICATION_BOOTSTRAP_DELAY_MS = __DEV__ ? 1500 : 800;
+const STARTUP_SYNC_DELAY_MS = __DEV__ ? 2200 : 1200;
+const PERIODIC_SYNC_INTERVAL_MS = __DEV__ ? 300000 : 60000; // 5 min in dev, 1 min in prod
+const ACTIVE_SYNC_COOLDOWN_MS = __DEV__ ? 45000 : 15000; // avoid repeated active-state bursts
+
 function NotificationBootstrap() {
   const { loading, token, user } = useAuth();
 
@@ -30,6 +48,8 @@ function NotificationBootstrap() {
     }
 
     if (!token) {
+      let cancelled = false;
+
       const clearLocalState = async () => {
         try {
           await resetDetoxNotificationSync();
@@ -43,56 +63,88 @@ function NotificationBootstrap() {
         // ignore logged-out cleanup failures
       });
 
-      return;
+      return () => {
+        cancelled = true;
+        void cancelled;
+      };
     }
 
     if (!user?.isOnboarded) {
       return;
     }
 
+    let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | null = null;
     let appStateSubscription: { remove: () => void } | null = null;
-    let cancelled = false;
+    let inFlightSync: Promise<void> | null = null;
+    let lastSyncAt = 0;
+    let lastKnownAppState = AppState.currentState;
 
-    const syncNow = async () => {
+    const syncNow = async (force = false): Promise<void> => {
       if (cancelled) {
         return;
       }
 
+      const now = Date.now();
+
+      if (!force && now - lastSyncAt < ACTIVE_SYNC_COOLDOWN_MS) {
+        return;
+      }
+
+      if (inFlightSync) {
+        return inFlightSync;
+      }
+
+      inFlightSync = (async () => {
+        try {
+          await syncDetoxNotifications();
+          await runLocalInterventionCheck();
+          lastSyncAt = Date.now();
+        } catch {
+          // ignore sync failures to keep app stable
+        }
+      })();
+
       try {
-        await syncDetoxNotifications();
-        await runLocalInterventionCheck();
-      } catch {
-        // ignore sync failures to keep app stable
+        await inFlightSync;
+      } finally {
+        inFlightSync = null;
       }
     };
 
-    const delayedStartupSync = InteractionManager.runAfterInteractions(() => {
-      setTimeout(() => {
-        syncNow().catch(() => {
+    const delayedStartupTask = InteractionManager.runAfterInteractions(() => {
+      const timer = setTimeout(() => {
+        syncNow(true).catch(() => {
           // ignore delayed startup sync failures
         });
-      }, 1200);
+      }, STARTUP_SYNC_DELAY_MS);
+
+      return () => clearTimeout(timer);
     });
 
-    appStateSubscription = AppState.addEventListener('change', state => {
-      if (state === 'active') {
-        syncNow().catch(() => {
+    appStateSubscription = AppState.addEventListener('change', nextState => {
+      const wasBackgrounded =
+        lastKnownAppState === 'background' || lastKnownAppState === 'inactive';
+
+      lastKnownAppState = nextState;
+
+      if (nextState === 'active' && wasBackgrounded) {
+        syncNow(false).catch(() => {
           // ignore app-active sync failures
         });
       }
     });
 
     intervalId = setInterval(() => {
-      syncNow().catch(() => {
+      syncNow(false).catch(() => {
         // ignore periodic sync failures
       });
-    }, 60000);
+    }, PERIODIC_SYNC_INTERVAL_MS);
 
     return () => {
       cancelled = true;
 
-      delayedStartupSync.cancel();
+      delayedStartupTask.cancel();
 
       if (appStateSubscription) {
         appStateSubscription.remove();
@@ -114,6 +166,7 @@ function AppNavigationShell() {
     <>
       <NotificationBootstrap />
       <NavigationContainer
+        theme={appNavigationTheme}
         key={token ? 'signed-in' : 'signed-out'}
         ref={navigationRef}
         onReady={() => {
@@ -137,7 +190,7 @@ export default function App() {
     let cancelled = false;
 
     const task = InteractionManager.runAfterInteractions(() => {
-      setTimeout(async () => {
+      const timer = setTimeout(async () => {
         if (cancelled) {
           return;
         }
@@ -148,7 +201,9 @@ export default function App() {
         } catch {
           // ignore notification bootstrap failures
         }
-      }, 800);
+      }, NOTIFICATION_BOOTSTRAP_DELAY_MS);
+
+      return () => clearTimeout(timer);
     });
 
     const unsubscribe = registerForegroundNotificationEvents();
@@ -174,5 +229,6 @@ export default function App() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
+    backgroundColor: '#0B1220',
   },
 });

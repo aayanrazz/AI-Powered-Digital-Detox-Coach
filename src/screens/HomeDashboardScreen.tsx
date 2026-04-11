@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -16,36 +16,138 @@ import { useAuth } from '../context/AuthContext';
 import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus';
 import { syncTodayUsageForDashboard } from '../services/dashboardUsageSync.service';
 
+type LoadOptions = {
+  forceSync?: boolean;
+  showSpinner?: boolean;
+};
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return 'Failed to load dashboard';
+}
+
 export default function HomeDashboardScreen({ navigation }: any) {
   const { user } = useAuth();
+
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [backgroundSyncing, setBackgroundSyncing] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      setRefreshing(true);
+  const mountedRef = useRef(false);
+  const requestIdRef = useRef(0);
 
-      // First sync live Android usage into backend
-      await syncTodayUsageForDashboard();
+  useEffect(() => {
+    mountedRef.current = true;
 
-      // Then load fresh dashboard data
-      const res = await api.getDashboard();
-      setDashboard(res.dashboard);
-    } catch (error: any) {
-      Alert.alert('Dashboard error', error.message || 'Failed to load dashboard');
-    } finally {
-      setRefreshing(false);
-    }
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
-  useRefreshOnFocus(load);
+  const fetchDashboard = useCallback(async (requestId: number) => {
+    const res = await api.getDashboard();
+
+    if (!mountedRef.current || requestId !== requestIdRef.current) {
+      return;
+    }
+
+    setDashboard(res?.dashboard ?? null);
+  }, []);
+
+  const syncAndRefreshDashboard = useCallback(
+    async (requestId: number, forceSync: boolean) => {
+      if (!mountedRef.current || requestId !== requestIdRef.current) {
+        return;
+      }
+
+      try {
+        setBackgroundSyncing(true);
+
+        await syncTodayUsageForDashboard(forceSync);
+
+        if (!mountedRef.current || requestId !== requestIdRef.current) {
+          return;
+        }
+
+        const res = await api.getDashboard();
+
+        if (!mountedRef.current || requestId !== requestIdRef.current) {
+          return;
+        }
+
+        setDashboard(res?.dashboard ?? null);
+      } catch {
+        // Keep existing dashboard visible even if sync fails.
+      } finally {
+        if (mountedRef.current && requestId === requestIdRef.current) {
+          setBackgroundSyncing(false);
+        }
+      }
+    },
+    []
+  );
+
+  const load = useCallback(
+    async ({ forceSync = false, showSpinner = false }: LoadOptions = {}) => {
+      requestIdRef.current += 1;
+      const requestId = requestIdRef.current;
+
+      if (mountedRef.current && showSpinner) {
+        setRefreshing(true);
+      }
+
+      try {
+        // Load dashboard first so UI appears quickly.
+        await fetchDashboard(requestId);
+      } catch (error) {
+        if (
+          mountedRef.current &&
+          requestId === requestIdRef.current &&
+          !dashboard
+        ) {
+          Alert.alert('Dashboard error', getErrorMessage(error));
+        }
+      } finally {
+        if (
+          mountedRef.current &&
+          requestId === requestIdRef.current &&
+          showSpinner
+        ) {
+          setRefreshing(false);
+        }
+      }
+
+      // Then sync usage in background and refresh once more.
+      void syncAndRefreshDashboard(requestId, forceSync);
+    },
+    [dashboard, fetchDashboard, syncAndRefreshDashboard]
+  );
+
+  const handleRefresh = useCallback(async () => {
+    await load({
+      forceSync: true,
+      showSpinner: true,
+    });
+  }, [load]);
+
+  const handleFocusLoad = useCallback(async () => {
+    await load({
+      forceSync: false,
+      showSpinner: dashboard === null,
+    });
+  }, [dashboard, load]);
+
+  useRefreshOnFocus(handleFocusLoad);
 
   return (
     <Screen
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
-          onRefresh={load}
+          onRefresh={handleRefresh}
           tintColor="#ffffff"
         />
       }
@@ -53,9 +155,14 @@ export default function HomeDashboardScreen({ navigation }: any) {
       <Text style={styles.greeting}>
         Hello, {dashboard?.welcomeName || user?.name || 'User'} 👋
       </Text>
+
       <Text style={styles.subtitle}>
         Here is your digital wellness snapshot for today
       </Text>
+
+      {backgroundSyncing ? (
+        <Text style={styles.syncHint}>Refreshing live Android usage…</Text>
+      ) : null}
 
       <View style={styles.row}>
         <MetricCard label="Focus Score" value={dashboard?.focusScore ?? 0} />
@@ -72,7 +179,10 @@ export default function HomeDashboardScreen({ navigation }: any) {
           value={`${dashboard?.streak ?? user?.streakCount ?? 0} days`}
         />
         <View style={styles.gap} />
-        <MetricCard label="Points" value={dashboard?.points ?? user?.points ?? 0} />
+        <MetricCard
+          label="Points"
+          value={dashboard?.points ?? user?.points ?? 0}
+        />
       </View>
 
       <View style={styles.panel}>
@@ -97,12 +207,14 @@ export default function HomeDashboardScreen({ navigation }: any) {
 
         {!!dashboard?.latestBadgeLabel && (
           <Text style={styles.badgeHighlight}>
-            {dashboard?.latestBadgeEmoji || '🏅'} Latest badge: {dashboard?.latestBadgeLabel}
+            {dashboard?.latestBadgeEmoji || '🏅'} Latest badge:{' '}
+            {dashboard?.latestBadgeLabel}
           </Text>
         )}
 
         <Text style={styles.panelSmall}>
-          {dashboard?.nextBadgeHintText || 'Keep progressing to unlock more badges.'}
+          {dashboard?.nextBadgeHintText ||
+            'Keep progressing to unlock more badges.'}
         </Text>
 
         <Pressable
@@ -136,7 +248,8 @@ export default function HomeDashboardScreen({ navigation }: any) {
 
           {!!dashboard?.topExceededAppName && (
             <Text style={styles.panelSmall}>
-              Top exceeded app: {dashboard.topExceededAppName} • +{dashboard.topExceededMinutes ?? 0} min
+              Top exceeded app: {dashboard.topExceededAppName} • +
+              {dashboard.topExceededMinutes ?? 0} min
             </Text>
           )}
 
@@ -146,7 +259,9 @@ export default function HomeDashboardScreen({ navigation }: any) {
 
           <Pressable
             style={styles.action}
-            onPress={() => navigation.navigate('MainTabs', { screen: 'UsageTab' })}
+            onPress={() =>
+              navigation.navigate('MainTabs', { screen: 'UsageTab' })
+            }
           >
             <Text style={styles.actionText}>Review Usage Limits</Text>
           </Pressable>
@@ -163,7 +278,8 @@ export default function HomeDashboardScreen({ navigation }: any) {
       <View style={styles.panel}>
         <Text style={styles.panelTitle}>Today’s Challenge</Text>
         <Text style={styles.panelText}>
-          {dashboard?.dailyChallenge || 'Take a short mindful break away from your phone.'}
+          {dashboard?.dailyChallenge ||
+            'Take a short mindful break away from your phone.'}
         </Text>
       </View>
 
@@ -219,7 +335,13 @@ const styles = StyleSheet.create({
   subtitle: {
     color: '#94A3B8',
     marginTop: 8,
-    marginBottom: 20,
+    marginBottom: 8,
+  },
+  syncHint: {
+    color: '#60A5FA',
+    marginBottom: 16,
+    fontSize: 13,
+    fontWeight: '600',
   },
   row: {
     flexDirection: 'row',

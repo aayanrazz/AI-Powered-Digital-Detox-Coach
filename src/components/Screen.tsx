@@ -15,14 +15,14 @@ export default function Screen({
 }: ScreenProps) {
   if (!scroll) {
     return (
-      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
         <View style={styles.container}>{children}</View>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
@@ -44,12 +44,16 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     padding: 18,
+    backgroundColor: '#0B1220',
   },
   scrollView: {
     flex: 1,
+    backgroundColor: '#0B1220',
   },
   scrollContent: {
     flexGrow: 1,
     padding: 18,
+    paddingBottom: 28,
+    backgroundColor: '#0B1220',
   },
 });

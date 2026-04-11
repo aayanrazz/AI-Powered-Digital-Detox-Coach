@@ -9,7 +9,7 @@ export const APP_CONFIG = {
       ? androidEmulatorBaseUrl
       : iosSimulatorBaseUrl,
 
-  API_TIMEOUT_MS: 10000,
+  API_TIMEOUT_MS: 60000,
 
   STORAGE_KEYS: {
     TOKEN: 'detox_token',

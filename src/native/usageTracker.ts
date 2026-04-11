@@ -4,22 +4,31 @@ import { UsageApp } from '../types';
 type UsageStatsModuleType = {
   isUsagePermissionGranted: () => Promise<boolean>;
   openUsageAccessSettings: () => Promise<boolean>;
-  getTodayUsageStats: () => Promise<any[]>;
+  getTodayUsageStats: () => Promise<unknown[]>;
+};
+
+type CacheEntry<T> = {
+  value: T;
+  checkedAt: number;
 };
 
 const UsageStatsModule = NativeModules.UsageStatsModule as
   | UsageStatsModuleType
   | undefined;
 
-const PERMISSION_CACHE_MS = 8000;
-const USAGE_CACHE_MS = 8000;
-const REQUEST_TIMEOUT_MS = 8000;
+const PERMISSION_CACHE_MS = __DEV__ ? 15000 : 8000;
+const USAGE_CACHE_MS = __DEV__ ? 30000 : 12000;
+const FAILURE_CACHE_MS = __DEV__ ? 12000 : 6000;
+const REQUEST_TIMEOUT_MS = __DEV__ ? 5000 : 7000;
 
-const OWN_APP_PACKAGE = 'com.detoxcoachmobile';
+const OWN_APP_PACKAGES = new Set([
+  'com.detoxcoachmobile',
+  'com.detoxcoach',
+]);
 
 const BLOCKED_PACKAGE_EXACT = new Set([
   'android',
-  OWN_APP_PACKAGE,
+  ...Array.from(OWN_APP_PACKAGES),
   'com.google.android.apps.nexuslauncher',
   'com.android.launcher',
   'com.android.launcher3',
@@ -95,9 +104,14 @@ const IGNORED_PACKAGE_TOKENS = new Set([
   'mobile',
 ]);
 
-let permissionCache: { value: boolean; checkedAt: number } | null = null;
-let usageCache: { value: UsageApp[]; checkedAt: number } | null = null;
+let permissionCache: CacheEntry<boolean> | null = null;
+let usageCache: CacheEntry<UsageApp[]> | null = null;
 let inFlightUsagePromise: Promise<UsageApp[]> | null = null;
+let lastNativeFailureAt = 0;
+
+function isAndroidUsageSupported(): boolean {
+  return Platform.OS === 'android' && !!UsageStatsModule;
+}
 
 function withTimeout<T>(
   promise: Promise<T>,
@@ -126,7 +140,10 @@ function normalizePackageName(value?: string): string {
 }
 
 function capitalizeToken(token: string): string {
-  if (!token) return '';
+  if (!token) {
+    return '';
+  }
+
   return token.charAt(0).toUpperCase() + token.slice(1);
 }
 
@@ -157,8 +174,13 @@ function isProbablyPackageLabel(appName?: string, packageName?: string): boolean
   const normalizedName = normalizePackageName(appName);
   const normalizedPackage = normalizePackageName(packageName);
 
-  if (!normalizedName) return true;
-  if (normalizedName === normalizedPackage) return true;
+  if (!normalizedName) {
+    return true;
+  }
+
+  if (normalizedName === normalizedPackage) {
+    return true;
+  }
 
   return /^[a-z0-9_.]+$/.test(normalizedName) && normalizedName.includes('.');
 }
@@ -184,8 +206,13 @@ function isIgnoredUsageApp(item: {
   const packageName = normalizePackageName(item?.packageName);
   const appName = String(item?.appName || '').trim().toLowerCase();
 
-  if (!packageName) return true;
-  if (BLOCKED_PACKAGE_EXACT.has(packageName)) return true;
+  if (!packageName) {
+    return true;
+  }
+
+  if (BLOCKED_PACKAGE_EXACT.has(packageName)) {
+    return true;
+  }
 
   if (BLOCKED_PACKAGE_PREFIXES.some(prefix => packageName.startsWith(prefix))) {
     return true;
@@ -221,27 +248,57 @@ function toSafeNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function normalizeUsageRows(data: any[]): UsageApp[] {
-  if (!Array.isArray(data)) return [];
+function toUsageApp(item: any): UsageApp {
+  const packageName = String(item?.packageName || '').trim();
+
+  return {
+    packageName,
+    appName: normalizeAppName(item?.appName, packageName),
+    foregroundMs: Math.max(0, toSafeNumber(item?.foregroundMs, 0)),
+    minutesUsed: Math.max(0, toSafeNumber(item?.minutesUsed, 0)),
+    lastTimeUsed:
+      item?.lastTimeUsed !== undefined && item?.lastTimeUsed !== null
+        ? Math.max(0, toSafeNumber(item?.lastTimeUsed, 0))
+        : undefined,
+    pickups: Math.max(0, toSafeNumber(item?.pickups, 0)),
+    unlocks: Math.max(0, toSafeNumber(item?.unlocks, 0)),
+    category: normalizeCategory(item?.category),
+  };
+}
+
+function pickPreferredText(primary?: string, secondary?: string): string {
+  const a = String(primary || '').trim();
+  const b = String(secondary || '').trim();
+
+  if (!a) return b;
+  if (!b) return a;
+
+  return a.length >= b.length ? a : b;
+}
+
+function mergeUsageRows(existing: UsageApp, incoming: UsageApp): UsageApp {
+  return {
+    packageName: existing.packageName || incoming.packageName,
+    appName: pickPreferredText(existing.appName, incoming.appName),
+    foregroundMs: Math.max(existing.foregroundMs || 0, incoming.foregroundMs || 0),
+    minutesUsed: Math.max(existing.minutesUsed || 0, incoming.minutesUsed || 0),
+    lastTimeUsed: Math.max(existing.lastTimeUsed || 0, incoming.lastTimeUsed || 0),
+    pickups: Math.max(existing.pickups || 0, incoming.pickups || 0),
+    unlocks: Math.max(existing.unlocks || 0, incoming.unlocks || 0),
+    category:
+      existing.category && existing.category !== 'Other'
+        ? existing.category
+        : incoming.category,
+  };
+}
+
+function normalizeUsageRows(data: unknown[]): UsageApp[] {
+  if (!Array.isArray(data)) {
+    return [];
+  }
 
   const cleaned = data
-    .map((item: any): UsageApp => {
-      const packageName = String(item?.packageName || '').trim();
-
-      return {
-        packageName,
-        appName: normalizeAppName(item?.appName, packageName),
-        foregroundMs: toSafeNumber(item?.foregroundMs, 0),
-        minutesUsed: toSafeNumber(item?.minutesUsed, 0),
-        lastTimeUsed:
-          item?.lastTimeUsed !== undefined && item?.lastTimeUsed !== null
-            ? toSafeNumber(item.lastTimeUsed, 0)
-            : undefined,
-        pickups: toSafeNumber(item?.pickups, 0),
-        unlocks: toSafeNumber(item?.unlocks, 0),
-        category: normalizeCategory(item?.category),
-      };
-    })
+    .map(item => toUsageApp(item))
     .filter(item => !isIgnoredUsageApp(item))
     .filter(
       item =>
@@ -255,22 +312,27 @@ function normalizeUsageRows(data: any[]): UsageApp[] {
     const key = normalizePackageName(item.packageName);
     const existing = byPackage.get(key);
 
-    if (!existing || (item.minutesUsed || 0) > (existing.minutesUsed || 0)) {
+    if (!existing) {
       byPackage.set(key, item);
+      continue;
     }
+
+    byPackage.set(key, mergeUsageRows(existing, item));
   }
 
   return Array.from(byPackage.values()).sort(
-    (a, b) => b.minutesUsed - a.minutesUsed,
+    (a, b) => (b.minutesUsed || 0) - (a.minutesUsed || 0),
   );
 }
 
 export const usageTracker = {
-  supported: Platform.OS === 'android' && !!UsageStatsModule,
+  supported: isAndroidUsageSupported(),
 
   async isPermissionGranted(force = false): Promise<boolean> {
     try {
-      if (Platform.OS !== 'android' || !UsageStatsModule) return false;
+      if (!isAndroidUsageSupported() || !UsageStatsModule) {
+        return false;
+      }
 
       const now = Date.now();
 
@@ -290,7 +352,7 @@ export const usageTracker = {
 
       permissionCache = {
         value: granted,
-        checkedAt: now,
+        checkedAt: Date.now(),
       };
 
       return granted;
@@ -299,6 +361,7 @@ export const usageTracker = {
         value: false,
         checkedAt: Date.now(),
       };
+
       return false;
     }
   },
@@ -307,7 +370,7 @@ export const usageTracker = {
     permissionCache = null;
 
     try {
-      if (Platform.OS !== 'android' || !UsageStatsModule) {
+      if (!isAndroidUsageSupported() || !UsageStatsModule) {
         return Linking.openSettings();
       }
 
@@ -322,12 +385,22 @@ export const usageTracker = {
   },
 
   async getTodayUsage(force = false): Promise<UsageApp[]> {
-    if (Platform.OS !== 'android' || !UsageStatsModule) return [];
+    if (!isAndroidUsageSupported() || !UsageStatsModule) {
+      return [];
+    }
 
     const now = Date.now();
 
     if (!force && usageCache && now - usageCache.checkedAt < USAGE_CACHE_MS) {
       return usageCache.value;
+    }
+
+    if (
+      !force &&
+      lastNativeFailureAt > 0 &&
+      now - lastNativeFailureAt < FAILURE_CACHE_MS
+    ) {
+      return usageCache?.value ?? [];
     }
 
     if (inFlightUsagePromise) {
@@ -336,7 +409,7 @@ export const usageTracker = {
 
     inFlightUsagePromise = (async () => {
       try {
-        const data = await withTimeout<any[]>(
+        const data = await withTimeout<unknown[]>(
           UsageStatsModule.getTodayUsageStats(),
           REQUEST_TIMEOUT_MS,
           'Reading Android usage took too long.',
@@ -349,9 +422,13 @@ export const usageTracker = {
           checkedAt: Date.now(),
         };
 
+        lastNativeFailureAt = 0;
+
         return normalized;
       } catch {
-        const fallback: UsageApp[] = [];
+        lastNativeFailureAt = Date.now();
+
+        const fallback = usageCache?.value ?? [];
 
         usageCache = {
           value: fallback,
@@ -369,9 +446,10 @@ export const usageTracker = {
     }
   },
 
-  clearCache() {
+  clearCache(): void {
     permissionCache = null;
     usageCache = null;
     inFlightUsagePromise = null;
+    lastNativeFailureAt = 0;
   },
 };
