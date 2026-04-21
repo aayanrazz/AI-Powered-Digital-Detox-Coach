@@ -29,6 +29,12 @@ const FOCUS_OPTIONS = [
 
 type RetentionOption = 7 | 30 | 90 | 180 | 365;
 
+const DEFAULT_RETENTION_OPTIONS: RetentionOption[] = [7, 30, 90, 180, 365];
+
+function isRetentionOption(value: number): value is RetentionOption {
+  return DEFAULT_RETENTION_OPTIONS.includes(value as RetentionOption);
+}
+
 function parseFocusAreas(input: string) {
   return input
     .split(',')
@@ -60,14 +66,8 @@ function formatDateTime(value?: string | null) {
 }
 
 function sanitizeRetentionDays(value: number | undefined): RetentionOption {
-  const allowed: RetentionOption[] = [7, 30, 90, 180, 365];
   const parsed = Number(value);
-
-  if (allowed.includes(parsed as RetentionOption)) {
-    return parsed as RetentionOption;
-  }
-
-  return 30;
+  return isRetentionOption(parsed) ? parsed : 30;
 }
 
 function createDefaultSettings(): SettingsData {
@@ -104,7 +104,7 @@ function createDefaultPolicy(): PrivacyPolicyData {
     updatedAt: '2026-03-27',
     summary: [],
     sections: [],
-    retentionOptions: [7, 30, 90, 180, 365],
+    retentionOptions: DEFAULT_RETENTION_OPTIONS,
     securityPractices: [],
     currentPrivacySettings: {
       dataCollection: false,
@@ -210,7 +210,9 @@ export default function SettingsPrivacyScreen() {
         focusAreas.filter(item => FOCUS_OPTIONS.includes(item as (typeof FOCUS_OPTIONS)[number]))
       );
       setCustomFocusAreas(
-        focusAreas.filter(item => !FOCUS_OPTIONS.includes(item as (typeof FOCUS_OPTIONS)[number])).join(', ')
+        focusAreas
+          .filter(item => !FOCUS_OPTIONS.includes(item as (typeof FOCUS_OPTIONS)[number]))
+          .join(', ')
       );
 
       setConsentGiven(Boolean(currentPrivacy.consentGiven));
@@ -367,16 +369,14 @@ export default function SettingsPrivacyScreen() {
     );
   }, [load]);
 
-  const retentionOptions = useMemo(() => {
+  const retentionOptions = useMemo<RetentionOption[]>(() => {
     const fromPolicy = Array.isArray(policy.retentionOptions)
       ? policy.retentionOptions
-      : [7, 30, 90, 180, 365];
+      : DEFAULT_RETENTION_OPTIONS;
 
-    const normalized = fromPolicy.filter(
-      item => item === 7 || item === 30 || item === 90 || item === 180 || item === 365
-    ) as RetentionOption[];
+    const normalized = fromPolicy.filter(isRetentionOption);
 
-    return normalized.length ? normalized : [7, 30, 90, 180, 365];
+    return normalized.length ? normalized : DEFAULT_RETENTION_OPTIONS;
   }, [policy.retentionOptions]);
 
   return (
