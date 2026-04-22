@@ -83,7 +83,7 @@ export async function http<T>(
 
     if (error?.name === 'AbortError') {
       throw new Error(
-        'Request timed out. Check that your backend is running and reachable from the emulator.'
+        'Request timed out. Check that your backend is running on port 5000 and that your phone can reach the backend.'
       );
     }
 
@@ -92,7 +92,7 @@ export async function http<T>(
       error instanceof TypeError
     ) {
       throw new Error(
-        'Network request failed. Make sure backend is running on port 5000 and Android emulator is using 10.0.2.2.'
+        'Network request failed. Make sure the backend is running on port 5000 and that the device can reach the backend API.'
       );
     }
 
